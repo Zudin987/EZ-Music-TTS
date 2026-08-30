@@ -1,0 +1,452 @@
+from pathlib import Path
+import json
+from textwrap import dedent
+
+
+def replace_exact(text, old, new, label, expected=1):
+    count = text.count(old)
+    if count != expected:
+        raise SystemExit(f'{label}: expected {expected} match(es), found {count}')
+    return text.replace(old, new, expected)
+
+
+commands_path = Path('src/commands.js')
+commands = commands_path.read_text(encoding='utf-8')
+
+commands = replace_exact(
+    commands,
+    "import { randomBytes } from 'node:crypto';\n",
+    "import { randomBytes } from 'node:crypto';\nimport { createLivePanelRegistry } from './live-panel.js';\n",
+    'live panel import',
+)
+
+queue_anchor = "  const queuePayload = (player, guildId, page = 0, selectedIndex = null, notice = null) => queueManagerPayload(player, page, selectedIndex, notice, { canUndo: canUndo(guildId) });\n\n"
+live_block = dedent("""\
+  const queuePayload = (player, guildId, page = 0, selectedIndex = null, notice = null) => queueManagerPayload(player, page, selectedIndex, notice, { canUndo: canUndo(guildId) });
+
+  const livePanels = createLivePanelRegistry({
+    render: async (sourceInteraction, { retiring }) => {
+      const currentPlayer = music.players.get(sourceInteraction.guildId);
+      if (!currentPlayer?.queue?.current) {
+        return {
+          payload: panelPayload(
+            currentPlayer,
+            sourceInteraction.guildId,
+            '⏹️ Playback ended or the bot disconnected. Live refresh stopped.',
+          ),
+          stopAfter: true,
+        };
+      }
+      return {
+        payload: panelPayload(
+          currentPlayer,
+          sourceInteraction.guildId,
+          retiring ? '⏱️ Live refresh ended after about 14 minutes. Press Refresh to resume live updates.' : null,
+        ),
+      };
+    },
+    onError: (error) => {
+      const code = Number(error?.code || 0);
+      if (![10015, 10062, 50027].includes(code)) console.warn('[live-panel]', error?.message || error);
+    },
+  });
+
+  async function editLivePanel(interaction, player, notice = null) {
+    const currentPlayer = music.players.get(interaction.guildId) || player;
+    const result = await interaction.editReply(panelPayload(currentPlayer, interaction.guildId, notice));
+    if (currentPlayer?.queue?.current) livePanels.track(interaction);
+    else livePanels.pause(interaction);
+    return result;
+  }
+
+""")
+commands = replace_exact(commands, queue_anchor, live_block, 'live panel registry block')
+
+commands = replace_exact(
+    commands,
+    "    withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,\n    queueLibraryRow, restoreUndo,\n",
+    "    withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,\n    queueLibraryRow, restoreUndo, livePanels, editLivePanel,\n",
+    'component api wiring',
+)
+
+commands = replace_exact(
+    commands,
+    "      if (name === 'nowplaying') {\n        requireSameVoice(interaction, player);\n        requireCurrentTrack(player);\n        return privateReply(interaction, null, panelPayload(player, interaction.guildId));\n      }\n",
+    "      if (name === 'nowplaying') {\n        requireSameVoice(interaction, player);\n        requireCurrentTrack(player);\n        await privateReply(interaction, null, panelPayload(player, interaction.guildId));\n        livePanels.track(interaction);\n        return;\n      }\n",
+    'nowplaying live registration',
+)
+
+commands = replace_exact(
+    commands,
+    "    withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,\n    queueLibraryRow, restoreUndo,\n  } = api;\n",
+    "    withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,\n    queueLibraryRow, restoreUndo, livePanels, editLivePanel,\n  } = api;\n",
+    'button api wiring',
+)
+
+commands = replace_exact(
+    commands,
+    "  const action = parts[1];\n\n  // Library/status/recovery controls work even while the bot is disconnected.\n",
+    "  const action = parts[1];\n\n  // Stop the previous auto-refresh lease before handling any button. Views that\n  // render the player again acquire a fresh ~14-minute interaction-token lease.\n  livePanels.pause(interaction);\n\n  // Library/status/recovery controls work even while the bot is disconnected.\n",
+    'button lease pause',
+)
+
+panel_replacements = [
+    (
+        "    return interaction.editReply(panelPayload(music.players.get(interaction.guildId), interaction.guildId, `✅ Resumed **${safeTitle(result.current, 90)}** near the saved position.${background}`));\n",
+        "    return editLivePanel(interaction, music.players.get(interaction.guildId), `✅ Resumed **${safeTitle(result.current, 90)}** near the saved position.${background}`);\n",
+        'recovery resume player',
+    ),
+    (
+        "  if (action === 'qback' || action === 'back') { await interaction.deferUpdate(); return interaction.editReply(panelPayload(player, interaction.guildId)); }\n",
+        "  if (action === 'qback' || action === 'back') { await interaction.deferUpdate(); return editLivePanel(interaction, player); }\n",
+        'back player',
+    ),
+    (
+        "  if (action === 'refresh') { await interaction.deferUpdate(); return interaction.editReply(panelPayload(player, interaction.guildId)); }\n",
+        "  if (action === 'refresh') { await interaction.deferUpdate(); return editLivePanel(interaction, player); }\n",
+        'refresh player',
+    ),
+    (
+        "    return interaction.editReply(panelPayload(player, interaction.guildId, `${added ? '❤️ Added to' : '💔 Removed from'} your favorites.`));\n",
+        "    return editLivePanel(interaction, player, `${added ? '❤️ Added to' : '💔 Removed from'} your favorites.`);\n",
+        'favorite player',
+    ),
+    (
+        "    return interaction.editReply(panelPayload(player, interaction.guildId, `↩️ Restored **${restored} track${restored === 1 ? '' : 's'}** from the last queue change.`));\n",
+        "    return editLivePanel(interaction, player, `↩️ Restored **${restored} track${restored === 1 ? '' : 's'}** from the last queue change.`);\n",
+        'undo player',
+    ),
+    (
+        "      return interaction.editReply(panelPayload(player, interaction.guildId, `▶️ Playing **${safeTitle(track, 80)}** now. The interrupted song was moved to the front of the queue.`));\n",
+        "      return editLivePanel(interaction, player, `▶️ Playing **${safeTitle(track, 80)}** now. The interrupted song was moved to the front of the queue.`);\n",
+        'queue play player',
+    ),
+    (
+        "      return interaction.editReply(panelPayload(player, interaction.guildId, `⏹️ Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`));\n",
+        "      return editLivePanel(interaction, player, `⏹️ Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`);\n",
+        'stop player',
+    ),
+    (
+        "    return interaction.editReply(panelPayload(player, interaction.guildId, notice));\n",
+        "    return editLivePanel(interaction, player, notice);\n",
+        'player controls refresh',
+    ),
+]
+for old, new, label in panel_replacements:
+    commands = replace_exact(commands, old, new, label)
+
+if 'interaction.editReply(panelPayload(' in commands:
+    raise SystemExit('unconverted direct player edit remains')
+
+commands = replace_exact(
+    commands,
+    "    'All replies and player/queue controls are private, so the music text channel stays empty.',\n",
+    "    'All replies and player/queue controls are private, so the music text channel stays empty.',\n    'The player auto-refreshes about every 10 seconds for up to ~14 minutes; Refresh or Back starts a fresh live window.',\n",
+    'help live refresh note',
+)
+commands_path.write_text(commands, encoding='utf-8')
+
+live_panel = dedent("""\
+export const LIVE_PANEL_REFRESH_MS = 10_000;
+export const LIVE_PANEL_TTL_MS = 14 * 60_000;
+export const LIVE_PANEL_MAX = 32;
+
+function panelKey(interaction) {
+  const guildId = interaction?.guildId;
+  const userId = interaction?.user?.id;
+  return guildId && userId ? `${guildId}:${userId}` : null;
+}
+
+export function createLivePanelRegistry({
+  refreshMs = LIVE_PANEL_REFRESH_MS,
+  ttlMs = LIVE_PANEL_TTL_MS,
+  maxEntries = LIVE_PANEL_MAX,
+  now = () => Date.now(),
+  render,
+  setIntervalFn = (callback, delay) => setInterval(callback, delay),
+  clearIntervalFn = (handle) => clearInterval(handle),
+  onError = () => {},
+} = {}) {
+  if (typeof render !== 'function') throw new TypeError('Live panel registry requires a render function.');
+
+  const intervalMs = Math.max(1, Number(refreshMs) || LIVE_PANEL_REFRESH_MS);
+  const leaseMs = Math.max(1, Number(ttlMs) || LIVE_PANEL_TTL_MS);
+  const limit = Math.max(1, Math.floor(Number(maxEntries) || LIVE_PANEL_MAX));
+  const entries = new Map();
+  let timer = null;
+
+  function stopTimerIfIdle() {
+    if (entries.size || timer === null) return;
+    clearIntervalFn(timer);
+    timer = null;
+  }
+
+  function ensureTimer() {
+    if (timer !== null || !entries.size) return;
+    timer = setIntervalFn(() => { void tick(); }, intervalMs);
+    timer?.unref?.();
+  }
+
+  function drop(key) {
+    const entry = entries.get(key);
+    if (entry) entry.active = false;
+    entries.delete(key);
+    stopTimerIfIdle();
+  }
+
+  function pause(interaction) {
+    const key = panelKey(interaction);
+    if (!key) return false;
+    const existed = entries.has(key);
+    drop(key);
+    return existed;
+  }
+
+  function track(interaction) {
+    const key = panelKey(interaction);
+    if (!key || typeof interaction?.editReply !== 'function') return false;
+
+    const currentTime = Number(now());
+    const safeNow = Number.isFinite(currentTime) ? currentTime : Date.now();
+    const createdAt = Number(interaction.createdTimestamp);
+    const tokenStart = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : safeNow;
+    const expiresAt = Math.min(safeNow + leaseMs, tokenStart + leaseMs);
+
+    const previous = entries.get(key);
+    if (previous) previous.active = false;
+    entries.delete(key);
+    entries.set(key, {
+      interaction,
+      expiresAt,
+      active: true,
+      updating: false,
+    });
+
+    while (entries.size > limit) {
+      const oldestKey = entries.keys().next().value;
+      if (oldestKey === undefined) break;
+      drop(oldestKey);
+    }
+    ensureTimer();
+    return true;
+  }
+
+  async function refreshEntry(key, entry, retiring) {
+    if (!entry.active || entries.get(key) !== entry || entry.updating) return;
+    entry.updating = true;
+    try {
+      const rendered = await render(entry.interaction, { retiring, expiresAt: entry.expiresAt });
+      if (!entry.active || entries.get(key) !== entry) return;
+      if (!rendered) {
+        drop(key);
+        return;
+      }
+
+      const payload = Object.prototype.hasOwnProperty.call(rendered, 'payload') ? rendered.payload : rendered;
+      const stopAfter = retiring || Boolean(rendered.stopAfter);
+      await entry.interaction.editReply(payload);
+      if (stopAfter && entries.get(key) === entry) drop(key);
+    } catch (error) {
+      if (entries.get(key) === entry) drop(key);
+      try { onError(error, { guildId: entry.interaction.guildId, userId: entry.interaction.user?.id }); } catch { /* logging must never break the scheduler */ }
+    } finally {
+      entry.updating = false;
+    }
+  }
+
+  async function tick() {
+    const currentTime = Number(now());
+    const safeNow = Number.isFinite(currentTime) ? currentTime : Date.now();
+    const work = [];
+    for (const [key, entry] of [...entries]) {
+      work.push(refreshEntry(key, entry, safeNow >= entry.expiresAt));
+    }
+    await Promise.allSettled(work);
+    stopTimerIfIdle();
+  }
+
+  function shutdown() {
+    for (const entry of entries.values()) entry.active = false;
+    entries.clear();
+    if (timer !== null) clearIntervalFn(timer);
+    timer = null;
+  }
+
+  return {
+    track,
+    pause,
+    tick,
+    shutdown,
+    has: (interaction) => {
+      const key = panelKey(interaction);
+      return Boolean(key && entries.has(key));
+    },
+    size: () => entries.size,
+  };
+}
+""")
+Path('src/live-panel.js').write_text(live_panel, encoding='utf-8')
+
+live_test = dedent("""\
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createLivePanelRegistry } from '../src/live-panel.js';
+import { readFileSync } from 'node:fs';
+
+function fakeScheduler() {
+  const state = { starts: 0, clears: 0, callback: null };
+  return {
+    state,
+    setIntervalFn(callback) {
+      state.starts += 1;
+      state.callback = callback;
+      return { unref() {} };
+    },
+    clearIntervalFn() {
+      state.clears += 1;
+      state.callback = null;
+    },
+  };
+}
+
+function fakeInteraction(id, { guildId = 'guild', userId = 'user', createdTimestamp = 1_000 } = {}) {
+  const edits = [];
+  return {
+    id,
+    guildId,
+    user: { id: userId },
+    createdTimestamp,
+    edits,
+    async editReply(payload) {
+      edits.push(payload);
+      return payload;
+    },
+  };
+}
+
+test('live registry keeps only the newest panel per guild/user', async () => {
+  let now = 1_000;
+  const scheduler = fakeScheduler();
+  const registry = createLivePanelRegistry({
+    now: () => now,
+    render: (interaction) => ({ content: interaction.id }),
+    setIntervalFn: scheduler.setIntervalFn,
+    clearIntervalFn: scheduler.clearIntervalFn,
+  });
+  const first = fakeInteraction('first');
+  const second = fakeInteraction('second');
+  assert.equal(registry.track(first), true);
+  assert.equal(registry.track(second), true);
+  assert.equal(registry.size(), 1);
+  assert.equal(scheduler.state.starts, 1);
+  await registry.tick();
+  assert.equal(first.edits.length, 0);
+  assert.deepEqual(second.edits, [{ content: 'second' }]);
+  registry.shutdown();
+});
+
+test('different users can each have one live panel and maxEntries evicts oldest', () => {
+  const scheduler = fakeScheduler();
+  const registry = createLivePanelRegistry({
+    maxEntries: 2,
+    render: () => ({ content: 'ok' }),
+    setIntervalFn: scheduler.setIntervalFn,
+    clearIntervalFn: scheduler.clearIntervalFn,
+  });
+  const now = Date.now();
+  const a = fakeInteraction('a', { userId: 'a', createdTimestamp: now });
+  const b = fakeInteraction('b', { userId: 'b', createdTimestamp: now });
+  const c = fakeInteraction('c', { userId: 'c', createdTimestamp: now });
+  registry.track(a);
+  registry.track(b);
+  registry.track(c);
+  assert.equal(registry.size(), 2);
+  assert.equal(registry.has(a), false);
+  assert.equal(registry.has(b), true);
+  assert.equal(registry.has(c), true);
+  registry.shutdown();
+});
+
+test('expired lease gets one final retiring render then stops', async () => {
+  let now = 10_000;
+  const scheduler = fakeScheduler();
+  const retiring = [];
+  const interaction = fakeInteraction('lease', { createdTimestamp: now });
+  const registry = createLivePanelRegistry({
+    ttlMs: 100,
+    now: () => now,
+    render: (_interaction, state) => {
+      retiring.push(state.retiring);
+      return { content: state.retiring ? 'expired' : 'live' };
+    },
+    setIntervalFn: scheduler.setIntervalFn,
+    clearIntervalFn: scheduler.clearIntervalFn,
+  });
+  registry.track(interaction);
+  await registry.tick();
+  assert.deepEqual(retiring, [false]);
+  now += 100;
+  await registry.tick();
+  assert.deepEqual(retiring, [false, true]);
+  assert.deepEqual(interaction.edits, [{ content: 'live' }, { content: 'expired' }]);
+  assert.equal(registry.size(), 0);
+  assert.equal(scheduler.state.clears, 1);
+});
+
+test('render can stop a live panel after a final idle update', async () => {
+  const scheduler = fakeScheduler();
+  const interaction = fakeInteraction('idle', { createdTimestamp: Date.now() });
+  const registry = createLivePanelRegistry({
+    render: () => ({ payload: { content: 'idle' }, stopAfter: true }),
+    setIntervalFn: scheduler.setIntervalFn,
+    clearIntervalFn: scheduler.clearIntervalFn,
+  });
+  registry.track(interaction);
+  await registry.tick();
+  assert.deepEqual(interaction.edits, [{ content: 'idle' }]);
+  assert.equal(registry.size(), 0);
+});
+
+test('pause immediately removes the matching live lease', () => {
+  const scheduler = fakeScheduler();
+  const interaction = fakeInteraction('pause', { createdTimestamp: Date.now() });
+  const registry = createLivePanelRegistry({
+    render: () => ({ content: 'ok' }),
+    setIntervalFn: scheduler.setIntervalFn,
+    clearIntervalFn: scheduler.clearIntervalFn,
+  });
+  registry.track(interaction);
+  assert.equal(registry.pause(interaction), true);
+  assert.equal(registry.size(), 0);
+  assert.equal(scheduler.state.clears, 1);
+});
+
+test('commands wire /nowplaying and player-return buttons into live refresh', () => {
+  const source = readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8');
+  assert.match(source, /createLivePanelRegistry/);
+  assert.match(source, /await privateReply\(interaction, null, panelPayload\(player, interaction\.guildId\)\);\s*livePanels\.track\(interaction\)/);
+  assert.match(source, /livePanels\.pause\(interaction\)/);
+  assert.match(source, /return editLivePanel\(interaction, player\)/);
+  assert.doesNotMatch(source, /interaction\.editReply\(panelPayload\(/);
+});
+""")
+Path('test/live-panel.test.js').write_text(live_test, encoding='utf-8')
+
+package_path = Path('package.json')
+package = json.loads(package_path.read_text(encoding='utf-8'))
+if package.get('version') != '0.1.1':
+    raise SystemExit(f"package version changed unexpectedly: {package.get('version')}")
+package['version'] = '0.1.2'
+check = package.get('scripts', {}).get('check', '')
+if 'src/live-panel.js' in check:
+    raise SystemExit('live-panel.js already exists in check script')
+package['scripts']['check'] = check + ' && node --check src/live-panel.js'
+package_path.write_text(json.dumps(package, indent=2) + '\n', encoding='utf-8')
+
+readme_path = Path('README.md')
+readme = readme_path.read_text(encoding='utf-8')
+old = "`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers. The progress bar is a static snapshot and updates only when the private panel is refreshed, so there is no background message-update timer."
+new = "`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers.\n\nWhile the main `/nowplaying` JukeBox view is open, its progress/current-track/status display refreshes about every **10 seconds**. Only one live player message per user/server is tracked. Opening Queue, More, History, or Favorites pauses that live lease so a background refresh never overwrites the sub-view; returning with Back or pressing Refresh starts a fresh lease. Each lease retires after about **14 minutes**, before Discord's ephemeral interaction token expires, and leaves a notice telling you to press Refresh to resume. The registry is capped at 32 live panels and uses one lazy timer only while at least one live panel exists; it adds no service or audio-processing process."
+if readme.count(old) != 1:
+    raise SystemExit(f'README live-refresh paragraph: expected 1 match, found {readme.count(old)}')
+readme_path.write_text(readme.replace(old, new, 1), encoding='utf-8')
