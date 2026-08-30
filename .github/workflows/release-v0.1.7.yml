@@ -1,0 +1,105 @@
+name: Publish EZ Music v0.1.7
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.7.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: a20217d036d4d840fbe0087a18c179061e3724d1
+
+      - name: Verify tested release source
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./package.json').version")" = "0.1.7"
+          test -f package-lock.json
+          test -f src/search-picker.js
+          test -f src/shutdown.js
+          grep -q '"better-sqlite3": "12.11.1"' package.json
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+          grep -q -- '-Dezmusic.instance=' start-bot.bat
+
+      - name: Build clean Windows install ZIP
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.7"
+          ROOT="dist/EZ-Music"
+          mkdir -p "$ROOT/src" "$ROOT/lavalink"
+          cp README.md package.json package-lock.json .env.example setup.bat start-bot.bat start-hidden.vbs stop-bot.bat install-autostart.bat install-autostart.ps1 remove-autostart.bat "$ROOT/"
+          cp src/*.js "$ROOT/src/"
+          cp lavalink/application.yml "$ROOT/lavalink/"
+          cat > "$ROOT/CLEAN-INSTALL.txt" <<'EOF'
+          EZ MUSIC v0.1.7 CLEAN WINDOWS INSTALL
+          ====================================
+          1. Stop EZ Music.
+          2. Back up C:\EZ-Music\.env.
+          3. If you want to preserve volume, favorites, history and crash/restart recovery,
+             also back up C:\EZ-Music\data\ez-music.sqlite.
+          4. Remove or rename the old C:\EZ-Music folder for a truly clean install.
+          5. Extract this ZIP so the app lives at C:\EZ-Music.
+          6. Restore your backed-up .env to C:\EZ-Music\.env.
+          7. Restore data\ez-music.sqlite only if you intentionally backed it up.
+          8. Run setup.bat. Dependencies are installed from package-lock.json with npm ci.
+          9. Test with start-bot.bat.
+          10. When satisfied, use start-hidden.vbs; reinstall Task Scheduler only if needed.
+
+          v0.1.7 HARDENING
+          ----------------
+          - Old /play select:true pickers cannot requeue or reconnect playback after the
+            queue was cleared, stopped or disconnected.
+          - Overlapping Windows stop/shutdown signals share one cleanup promise, so recovery,
+            player destruction and SQLite close are not cut short by a second exit path.
+          - Bundled Lavalink connection settings are fixed to localhost as one source of truth.
+          - package-lock.json + npm ci make clean installs reproducible.
+          - better-sqlite3 is pinned to 12.11.1 for reliable clean Windows installation.
+          - Lavalink carries an install-specific JVM marker; stop-bot verifies it before kill.
+          - CI now tests Lavalink at the same 64M initial / 256M max Java heap as production.
+
+          AUDIO / MEMORY POLICY UNCHANGED
+          -------------------------------
+          Lavalink remains 2s NAS / 20s frame buffer with nonAllocatingFrameBuffer enabled,
+          max 256 MB Java heap, and Node max 128 MB heap. YouTube client order remains MUSIC,
+          ANDROID_VR, WEB, WEBEMBEDDED. DSP remains disabled except volume. SQLite remains the
+          only persistence service. Queue limits remain 300 upcoming / 250 per playlist.
+
+          This package intentionally contains no .env, real secrets, SQLite database,
+          node_modules, logs, Lavalink.jar, or runtime plugin files.
+          EOF
+          cd dist
+          zip -r -9 "EZ-Music-${VERSION}-Windows-Clean.zip" EZ-Music >/dev/null
+          sha256sum "EZ-Music-${VERSION}-Windows-Clean.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create v0.1.7 \
+            dist/EZ-Music-v0.1.7-Windows-Clean.zip \
+            dist/SHA256SUMS.txt \
+            --target a20217d036d4d840fbe0087a18c179061e3724d1 \
+            --title "EZ Music v0.1.7" \
+            --notes "Audit-hardening release. Stale /play select:true pickers are revision-guarded before player creation and again at mutation time; overlapping shutdown paths share one cleanup promise; bundled Lavalink connection settings are fixed localhost-only; package-lock.json and npm ci provide reproducible installs; better-sqlite3 is pinned to 12.11.1 to avoid the current v13 Windows clean-install node-gyp regression; Lavalink gets an install-specific JVM/PID marker; and CI now runs the live Lavalink/YTM/YouTube smoke test at the same -Xms64M/-Xmx256M profile as production. PR #9 and post-merge main CI passed Windows and Ubuntu, including 84 tests, clean Windows npm ci + SQLite smoke, embedded PowerShell launcher parsing, and live Lavalink/YTM/YouTube at 256 MB. Audio behavior is unchanged: 2s NAS / 20s frame buffer, non-allocating frame buffer, Node 128 MB cap, existing YouTube snapshot/client chain, queue limits and DSP-off policy remain intact."
+
+      - name: Remove merged feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin --delete audit/v017-hardening || true
