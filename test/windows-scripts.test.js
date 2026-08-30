@@ -16,6 +16,15 @@ test('Windows setup uses native Java Lavalink and verifies the pinned jar', () =
   assert.doesNotMatch(setup, /\bwhere\s+docker\b|\bdocker\s+compose\b/i);
 });
 
+test('Windows Java check is cmd-safe and does not pass cmd escapes into PowerShell', () => {
+  for (const script of [setup, start]) {
+    assert.match(script, /for \/f "tokens=3" %%V in \('java -version 2\^>\^&1 \^\| findstr \/i "version"'\)/i);
+    assert.match(script, /set "JAVA_MAJOR=/i);
+    assert.match(script, /if %JAVA_MAJOR% LSS 17/i);
+    assert.doesNotMatch(script, /powershell[^\n]*java -version/i);
+  }
+});
+
 test('Windows launcher starts standalone Lavalink with bounded heap and waits for authenticated readiness', () => {
   assert.match(start, /Starting native Lavalink/i);
   assert.match(start, /-Xms128M/i);
