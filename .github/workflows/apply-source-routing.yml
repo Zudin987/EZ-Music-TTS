@@ -1,0 +1,47 @@
+name: Apply YTM and Spotify routing
+
+on:
+  push:
+    branches:
+      - feature/ytm-spotify-routing
+    paths:
+      - .github/apply-source-routing.py
+      - .github/workflows/apply-source-routing.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/ytm-spotify-routing
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+
+      - name: Apply routing implementation
+        run: python3 .github/apply-source-routing.py
+
+      - name: Validate Node implementation
+        run: |
+          npm install
+          npm run check
+          npm test
+
+      - name: Commit implementation and remove staging files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "MrEz"
+          git config user.email "39240221+Zudin987@users.noreply.github.com"
+          git add package.json .env.example README.md setup.bat start-bot.bat lavalink/application.yml src/config.js src/music.js src/commands.js test/source-routing.test.js .github/workflows/ci.yml
+          git rm .github/apply-source-routing.py .github/workflows/apply-source-routing.yml
+          git commit -m "feat: prefer YouTube Music and mirror Spotify URLs"
+          git push origin HEAD:feature/ytm-spotify-routing
