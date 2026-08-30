@@ -65,6 +65,75 @@ export function createMusic(client, config, gemini) {
   const operationChains = new Map();
   const playerCreationPromises = new Map();
   const recoveryResumes = new Set();
+  const spotifyConfigured = Boolean(config.spotifyClientId && config.spotifyClientSecret);
+
+  function isHttpUrl(value) {
+    try {
+      const url = new URL(String(value || '').trim());
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  function isSpotifyReference(value) {
+    const text = String(value || '').trim();
+    if (/^spotify:(track|album|playlist|artist):/i.test(text)) return true;
+    try {
+      const url = new URL(text);
+      const host = url.hostname.toLowerCase();
+      return host === 'open.spotify.com' || host.endsWith('.open.spotify.com');
+    } catch {
+      return false;
+    }
+  }
+
+  function isSpotifyShortLink(value) {
+    try {
+      const url = new URL(String(value || '').trim());
+      const host = url.hostname.toLowerCase();
+      return host === 'spotify.link' || host.endsWith('.spotify.link');
+    } catch {
+      return false;
+    }
+  }
+
+  function hasExplicitSearchPrefix(value) {
+    return /^(?:ytmsearch|ytsearch|scsearch|spsearch):/i.test(String(value || '').trim());
+  }
+
+  async function searchPreferred(target, query, requester) {
+    const clean = String(query || '').trim();
+    if (!clean) throw new Error('Search query is empty.');
+
+    if (isSpotifyShortLink(clean)) {
+      throw new Error('Spotify short links (spotify.link) are not supported by the current LavaSrc source. Open the link in Spotify and paste the full open.spotify.com URL instead.');
+    }
+
+    if (isSpotifyReference(clean)) {
+      if (!spotifyConfigured) {
+        throw new Error('Spotify URL support is not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to .env, then restart EZ Music.');
+      }
+      return target.search(clean, { requester });
+    }
+
+    // Never rewrite direct URLs or an explicitly requested search prefix.
+    if (isHttpUrl(clean) || hasExplicitSearchPrefix(clean)) return target.search(clean, { requester });
+
+    let ytmError = null;
+    try {
+      const ytm = await target.search(clean, { requester, source: 'ytmsearch:' });
+      if (ytm?.tracks?.length) return ytm;
+    } catch (error) {
+      ytmError = error;
+    }
+
+    try {
+      return await target.search(clean, { requester, source: 'ytsearch:' });
+    } catch (error) {
+      throw error || ytmError || new Error(`No results for: ${clean}`);
+    }
+  }
 
   async function withGuildOperation(guildId, task) {
     const previous = operationChains.get(guildId) || Promise.resolve();
@@ -192,9 +261,9 @@ export function createMusic(client, config, gemini) {
     if (!row) return null;
     const primary = String(row.uri || '').trim() || `${row.author || ''} ${row.title || ''}`.trim();
     if (!primary) return null;
-    let result = await player.search(primary, { requester }).catch(() => null);
+    let result = await searchPreferred(player, primary, requester).catch(() => null);
     if (!result?.tracks?.length && row.title) {
-      result = await player.search(`${row.author || ''} ${row.title}`.trim(), { requester }).catch(() => null);
+      result = await searchPreferred(player, `${row.author || ''} ${row.title}`.trim(), requester).catch(() => null);
     }
     return result?.tracks?.[0] || null;
   }
@@ -762,7 +831,7 @@ export function createMusic(client, config, gemini) {
     for (let offset = 0; offset < cleanQueries.length && selected.length < limit; offset += width) {
       if (revision !== null && !queueRequestStillValid(player, revision)) break;
       const batch = cleanQueries.slice(offset, offset + width);
-      const results = await Promise.all(batch.map((query) => player.search(query, { requester }).catch(() => null)));
+      const results = await Promise.all(batch.map((query) => searchPreferred(player, query, requester).catch(() => null)));
       if (revision !== null && !queueRequestStillValid(player, revision)) break;
       for (const result of results) {
         const track = result?.tracks?.find((candidate) => {
@@ -810,7 +879,7 @@ export function createMusic(client, config, gemini) {
 
     const fallbackQuery = `${seedTrack.author || seedTrack.title || ''} songs`.trim();
     if (fallbackQuery) {
-      const fallback = await player.search(fallbackQuery, { requester }).catch(() => null);
+      const fallback = await searchPreferred(player, fallbackQuery, requester).catch(() => null);
       takeUsable(fallback?.tracks);
     }
     return selected.slice(0, limit);
@@ -966,6 +1035,8 @@ export function createMusic(client, config, gemini) {
     startServerRadio,
     setGuildAutoplay,
     getGuildAutoplay: getAutoplayMode,
+    searchPreferred,
+    isSpotifyConfigured: () => spotifyConfigured,
     getGuildVolume,
     setGuildVolume,
     getQueueRevision,

@@ -155,14 +155,14 @@ function skipCurrent(player) {
   player.skip();
 }
 
-async function searchTracks(player, query, requester) {
-  const result = await player.search(query, { requester });
+async function searchTracks(player, query, requester, searchPreferred) {
+  const result = await searchPreferred(player, query, requester);
   if (!result?.tracks?.length) throw new Error(`No results for: ${truncate(query, 120)}`);
   return { result, tracks: result.type === 'PLAYLIST' ? [...result.tracks] : [result.tracks[0]] };
 }
 
-async function searchAndQueue(player, query, requester, next, guard, queueTracks, queueLimit, mutate = async (task) => task()) {
-  const { tracks, result } = await searchTracks(player, query, requester);
+async function searchAndQueue(player, query, requester, next, guard, queueTracks, queueLimit, searchPreferred, mutate = async (task) => task()) {
+  const { tracks, result } = await searchTracks(player, query, requester, searchPreferred);
   guard();
   const perRequestLimit = result.type === 'PLAYLIST' ? MAX_PLAYLIST_ADD : 1;
   const queued = await mutate(async () => {
@@ -175,7 +175,7 @@ async function searchAndQueue(player, query, requester, next, guard, queueTracks
   return { tracks: queued.added, result, omitted: queued.omitted, sourceCount: tracks.length };
 }
 
-async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3, guard = () => {}) {
+async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3, guard = () => {}, searchPreferred = null) {
   const added = [];
   const cleanQueries = (queries || []).filter(Boolean);
   const width = Math.max(1, Math.min(5, concurrency));
@@ -183,7 +183,7 @@ async function resolveSearchQueries(player, queries, requester, seen = new Set()
   for (let offset = 0; offset < cleanQueries.length && added.length < limit; offset += width) {
     guard();
     const batch = cleanQueries.slice(offset, offset + width);
-    const results = await Promise.all(batch.map((query) => player.search(query, { requester }).catch(() => null)));
+    const results = await Promise.all(batch.map((query) => (searchPreferred ? searchPreferred(player, query, requester) : player.search(query, { requester })).catch(() => null)));
     guard();
     for (const result of results) {
       const track = result?.tracks?.find((candidate) => {
@@ -323,6 +323,7 @@ function helpText() {
     'The player auto-refreshes about every 10 seconds for up to ~14 minutes; Refresh or Back starts a fresh live window.',
     'Queue Manager: select tracks, Remove / Move Next / Play Now / Dedupe, with a 5-minute Undo for clear/remove/dedupe.',
     'More: seek/replay plus Favorites and Recent History. `/play select:true` privately lets you choose an exact search result.',
+    'Plain-text song searches try YouTube Music first, then normal YouTube. Spotify URLs work when optional Spotify app credentials are configured.',
     '`/status` offers Resume/Discard when a recent crash/restart session is recoverable.',
     '`/clear` keeps the current song playing, clears everything upcoming, and turns loop/autoplay off.',
     '`/stop` fully resets current/upcoming/previous state. Volume stays saved until changed again.',
@@ -354,6 +355,8 @@ export function createInteractionHandler({
   clearRecoverySession,
   getRecoverableSession,
   resumeRecoverySession,
+  searchPreferred,
+  isSpotifyConfigured,
 }) {
   const queueLimit = getQueueLimit();
   const queueControls = { setGuildAutoplay, invalidateQueueWork, discardHeldQueue, clearRecoverySession };
@@ -416,7 +419,7 @@ async function editLivePanel(interaction, player, notice = null) {
     if (!query) throw expectedError('That saved track no longer has enough information to play.');
     const player = await ensurePlayer(interaction);
     const revision = getQueueRevision(interaction.guildId);
-    const result = await player.search(query, { requester: interaction.user });
+    const result = await searchPreferred(player, query, interaction.user);
     const track = result?.tracks?.[0];
     if (!track) throw new Error('The music source could not resolve that saved track.');
     await withGuildOperation(interaction.guildId, async () => {
@@ -506,6 +509,7 @@ async function editLivePanel(interaction, player, notice = null) {
           `Lavalink: **${lavalink}**`,
           sourceHealthLine(health),
           `Gemini: **${gemini.enabled ? `Configured (${gemini.model})` : 'Not configured'}**`,
+          `Spotify URL mirror: **${isSpotifyConfigured() ? 'Configured' : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Saved volume: **${volume}%**`,
           `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
@@ -544,7 +548,7 @@ async function editLivePanel(interaction, player, notice = null) {
         const query = interaction.options.getString('query', true);
         const next = name === 'playnext';
         if (interaction.options.getBoolean('select') === true) {
-          const result = await music.search(query, { requester: interaction.user });
+          const result = await searchPreferred(music, query, interaction.user);
           if (!result?.tracks?.length) throw new Error(`No results for: ${truncate(query, 120)}`);
           if (result.type !== 'PLAYLIST' && result.tracks.length > 1) {
             const token = createSearchPicker(interaction, result.tracks, next);
@@ -555,7 +559,7 @@ async function editLivePanel(interaction, player, notice = null) {
         const player = await ensurePlayer(interaction);
         const revision = getQueueRevision(interaction.guildId);
         const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);
-        const queued = await searchAndQueue(player, query, interaction.user, next, guard, queueTracks, queueLimit, (task) => withGuildOperation(interaction.guildId, task));
+        const queued = await searchAndQueue(player, query, interaction.user, next, guard, queueTracks, queueLimit, searchPreferred, (task) => withGuildOperation(interaction.guildId, task));
         checkpointRecovery(player);
         const where = next ? 'Queued next' : 'Queued';
         if (queued.result.type === 'PLAYLIST') {
@@ -595,7 +599,7 @@ async function editLivePanel(interaction, player, notice = null) {
           const key = trackKey(track);
           if (key) seen.add(key);
         }
-        const resolved = await resolveSearchQueries(player, plan.queries, interaction.user, seen, 10, 3, guard);
+        const resolved = await resolveSearchQueries(player, plan.queries, interaction.user, seen, 10, 3, guard, searchPreferred);
         guard();
         if (!resolved.length) throw new Error('Gemini suggested songs, but none could be resolved by the music source.');
         const queued = await withGuildOperation(interaction.guildId, async () => {

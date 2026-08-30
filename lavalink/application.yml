@@ -9,6 +9,9 @@ lavalink:
     # Pin the latest upstream fix snapshot currently used by this bot.
     - dependency: "dev.lavalink.youtube:youtube-plugin:f45bbb7aebfcbc1c553769e04af6cd43afa8b7c3"
       snapshot: true
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      repository: "https://maven.lavalink.dev/releases"
+      snapshot: false
   server:
     password: "ezmusic-local-only"
     sources:
@@ -47,6 +50,44 @@ lavalink:
     youtubePlaylistLoadLimit: 3
 
 plugins:
+  lavasrc:
+    # Spotify is metadata-only/mirrored. It is enabled at launch only when both
+    # SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET exist in .env.
+    providers:
+      - 'ytmsearch:"%ISRC%"'
+      - 'ytmsearch:%QUERY%'
+      - 'ytsearch:"%ISRC%"'
+      - 'ytsearch:%QUERY%'
+    sources:
+      spotify: ${SPOTIFY_ENABLED:false}
+      applemusic: false
+      deezer: false
+      yandexmusic: false
+      flowerytts: false
+      youtube: false
+      vkmusic: false
+      tidal: false
+      qobuz: false
+      ytdlp: false
+      jiosaavn: false
+    lyrics-sources:
+      spotify: false
+      deezer: false
+      youtube: false
+      yandexmusic: false
+      vkmusic: false
+      lrcLib: false
+    spotify:
+      clientId: "${SPOTIFY_CLIENT_ID:}"
+      clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
+      countryCode: "${SPOTIFY_COUNTRY_CODE:MY}"
+      # Keep source responses bounded to the bot's own 300-upcoming queue ceiling.
+      playlistLoadLimit: 3
+      albumLoadLimit: 2
+      resolveArtistsInSearch: false
+      localFiles: false
+      preferPartnerApi: false
+
   youtube:
     enabled: true
     allowSearch: true

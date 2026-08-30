@@ -19,6 +19,8 @@ export const config = {
   lavalinkUrl: process.env.LAVALINK_URL?.trim() || 'localhost:2333',
   lavalinkPassword: process.env.LAVALINK_PASSWORD?.trim() || 'ezmusic-local-only',
   lavalinkSecure: (process.env.LAVALINK_SECURE ?? 'false').toLowerCase() === 'true',
+  spotifyClientId: process.env.SPOTIFY_CLIENT_ID?.trim() || '',
+  spotifyClientSecret: process.env.SPOTIFY_CLIENT_SECRET?.trim() || '',
   geminiApiKey: process.env.GEMINI_API_KEY?.trim() || '',
   geminiModel: process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash-lite',
   defaultVolume: integer('DEFAULT_VOLUME', 80, 0, 100),

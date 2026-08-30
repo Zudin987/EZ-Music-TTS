@@ -26,6 +26,22 @@ jobs:
         run: node -e "import('./src/storage.js').then(({ closeStorage }) => closeStorage())"
       - run: npm run check
       - run: npm test
+      - name: Parse embedded Lavalink PowerShell launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $line = Get-Content -LiteralPath 'start-bot.bat' | Where-Object { $_ -like 'powershell -NoProfile -ExecutionPolicy Bypass -Command *' } | Select-Object -First 1
+          if (-not $line) { throw 'Embedded Lavalink PowerShell launcher was not found.' }
+          $prefix = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "'
+          if (-not $line.StartsWith($prefix) -or -not $line.EndsWith('"')) { throw 'Unexpected Lavalink launcher command shape.' }
+          $body = $line.Substring($prefix.Length, $line.Length - $prefix.Length - 1)
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput($body, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw 'Embedded Lavalink PowerShell command has parse errors.'
+          }
 
   lavalink-smoke:
     timeout-minutes: 6
@@ -36,7 +52,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Standalone Lavalink + YouTube plugin smoke test
+      - name: Standalone Lavalink + YouTube/LavaSrc plugin smoke test
         shell: bash
         run: |
           set -euo pipefail
@@ -60,11 +76,13 @@ jobs:
           done
           if [ "$ready" -ne 1 ]; then
             echo 'Lavalink did not become ready in time.' >&2
-            tail -n 120 ../lavalink-ci.log >&2 || true
+            tail -n 160 ../lavalink-ci.log >&2 || true
             exit 1
           fi
 
           curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/v4/info > /tmp/lavalink-info.json
+          curl -fsSG -H 'Authorization: ezmusic-local-only' --data-urlencode 'identifier=ytmsearch:Rick Astley Never Gonna Give You Up' http://127.0.0.1:2333/v4/loadtracks > /tmp/ytm-search.json
+          curl -fsSG -H 'Authorization: ezmusic-local-only' --data-urlencode 'identifier=ytsearch:Rick Astley Never Gonna Give You Up' http://127.0.0.1:2333/v4/loadtracks > /tmp/yt-search.json
           python3 - <<'PY'
           import json
           with open('/tmp/lavalink-info.json', encoding='utf-8') as f:
@@ -72,9 +90,15 @@ jobs:
           plugins = [str(item.get('name', '')).lower() for item in info.get('plugins', [])]
           sources = [str(item).lower() for item in info.get('sourceManagers', [])]
           assert any('youtube' in name for name in plugins), f'YouTube plugin missing: {plugins}'
+          assert any('lavasrc' in name for name in plugins), f'LavaSrc plugin missing: {plugins}'
           assert any('youtube' in name for name in sources), f'YouTube source manager missing: {sources}'
-          print('Standalone Lavalink and YouTube source manager loaded.')
+          for label, path in [('YouTube Music', '/tmp/ytm-search.json'), ('YouTube', '/tmp/yt-search.json')]:
+              with open(path, encoding='utf-8') as f:
+                  result = json.load(f)
+              tracks = result.get('data', []) if result.get('loadType') == 'search' else []
+              assert tracks, f'{label} search returned no usable tracks: {result}'
+          print('Standalone Lavalink, YouTube Music/YouTube search, and LavaSrc plugin loaded successfully.')
           PY
       - name: Show Lavalink logs on failure
         if: failure()
-        run: tail -n 160 lavalink-ci.log || true
+        run: tail -n 200 lavalink-ci.log || true
