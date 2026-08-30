@@ -9,6 +9,7 @@ import { closeStorage } from './storage.js';
 
 fs.mkdirSync('data', { recursive: true });
 const pidFile = path.resolve('data', 'ez-music.pid');
+const stopRequestFile = path.resolve('data', 'stop.requested');
 
 function writePidFile() {
   fs.writeFileSync(pidFile, String(process.pid), { encoding: 'ascii' });
@@ -65,6 +66,15 @@ function exitAfterShutdown(signal, exitCode, error) {
     .catch((shutdownError) => console.error('[shutdown]', shutdownError))
     .finally(() => process.exit(exitCode));
 }
+
+// stop-bot.bat creates this marker first. Polling it lets hidden/task-scheduled
+// instances close Discord + SQLite cleanly before stop-bot falls back to a
+// forced process termination. It also closes the startup race where a stop is
+// requested while Lavalink is still warming up and Node starts a moment later.
+const stopWatcher = setInterval(() => {
+  if (!shuttingDown && fs.existsSync(stopRequestFile)) exitAfterShutdown('stop-requested', 0);
+}, 500);
+stopWatcher.unref?.();
 
 process.once('SIGINT', () => exitAfterShutdown('SIGINT', 0));
 process.once('SIGTERM', () => exitAfterShutdown('SIGTERM', 0));
