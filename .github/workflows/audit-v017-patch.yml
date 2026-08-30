@@ -23,7 +23,8 @@ jobs:
           node-version: '22.14.0'
           package-manager-cache: false
       - name: Prepare patch helper
-        run: python3 -c "from pathlib import Path; p=Path('tools/audit_v017_patch.py'); s=p.read_text(); s=s.replace('if count != 1:', 'if count < 1:', 1); p.write_text(s)"
+        run: |
+          python3 -c "from pathlib import Path; p=Path('tools/audit_v017_patch.py'); s=p.read_text(); s=s.replace('if count != 1:', 'if count < 1:', 1); p.write_text(s)"
       - name: Apply audited patch
         run: python3 tools/audit_v017_patch.py
       - name: Align regression tests
