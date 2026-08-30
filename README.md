@@ -42,7 +42,9 @@ Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear �
 
 `Favorite` saves/removes the currently displayed song from your personal SQLite favorites. The button is fingerprinted to the displayed track, so an old private panel cannot accidentally favorite a different song after the track changes.
 
-`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers. The progress bar is a static snapshot and updates only when the private panel is refreshed, so there is no background message-update timer.
+`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers.
+
+While the main `/nowplaying` JukeBox view is open, its progress/current-track/status display refreshes about every **10 seconds**. Only one live player message per user/server is tracked. Opening Queue, More, History, or Favorites pauses that live lease so a background refresh never overwrites the sub-view; returning with Back or pressing Refresh starts a fresh lease. Each lease retires after about **14 minutes**, before Discord's ephemeral interaction token expires, and leaves a notice telling you to press Refresh to resume. The registry is capped at 32 live panels and uses one lazy timer only while at least one live panel exists; it adds no service or audio-processing process.
 
 For ambiguous text searches, `/play ... select:true` and `/playnext ... select:true` open a private top-5 result picker for 2 minutes. Direct URLs/playlists remain immediate. The picker is bounded in memory and has no background timer.
 
