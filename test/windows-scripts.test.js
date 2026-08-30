@@ -18,10 +18,12 @@ test('Windows setup uses native Java Lavalink and verifies the pinned jar', () =
   assert.doesNotMatch(setup, /\bwhere\s+docker\b|\bdocker\s+compose\b/i);
 });
 
-test('Windows launcher starts standalone Lavalink with bounded heap and an explicit working directory', () => {
+test('Windows launcher starts standalone Lavalink with low-memory caps and an explicit working directory', () => {
   assert.match(start, /Starting native Lavalink/i);
-  assert.match(start, /-Xms128M/i);
-  assert.match(start, /-Xmx512M/i);
+  assert.match(start, /-Xms64M/i);
+  assert.match(start, /-Xmx256M/i);
+  assert.match(start, /--max-old-space-size=128/i);
+  assert.doesNotMatch(start, /-Xmx512M/i);
   assert.match(start, /Start-Process -FilePath 'java'/i);
   assert.match(start, /set "LAVALINK_WORK=%CD%\\lavalink"/i);
   assert.match(start, /\$work=\$env:LAVALINK_WORK/i);
