@@ -6,6 +6,7 @@ import { createMusic } from './music.js';
 import { createInteractionHandler, registerGuildCommands } from './commands.js';
 import { GeminiDJ } from './gemini.js';
 import { closeStorage } from './storage.js';
+import { createShutdownCoordinator } from './shutdown.js';
 
 fs.mkdirSync('data', { recursive: true });
 const pidFile = path.resolve('data', 'ez-music.pid');
@@ -48,11 +49,8 @@ client.once(Events.ClientReady, async () => {
 client.on('interactionCreate', createInteractionHandler({ client, gemini, ...playerApi }));
 client.on('error', (error) => console.error('[discord]', error));
 
-let shuttingDown = false;
-async function shutdown(signal, exitCode = 0) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  process.exitCode = exitCode;
+let requestedExitCode = 0;
+const shutdownCoordinator = createShutdownCoordinator(async (signal) => {
   console.log(`[shutdown] ${signal}`);
 
   // Preserve a lightweight session snapshot before intentional process shutdown.
@@ -65,13 +63,20 @@ async function shutdown(signal, exitCode = 0) {
   try { closeStorage(); }
   catch (error) { console.warn('[shutdown] storage close failed', error?.message || error); }
   removeOwnPidFile();
+});
+
+function shutdown(signal, exitCode = 0) {
+  const code = Number(exitCode) || 0;
+  if (!shutdownCoordinator.isRunning() || code !== 0) requestedExitCode = code;
+  process.exitCode = requestedExitCode;
+  return shutdownCoordinator.run(signal);
 }
 
 function exitAfterShutdown(signal, exitCode, error) {
   if (error) console.error(`[${signal}]`, error);
   shutdown(signal, exitCode)
     .catch((shutdownError) => console.error('[shutdown]', shutdownError))
-    .finally(() => process.exit(exitCode));
+    .finally(() => process.exit(requestedExitCode));
 }
 
 // stop-bot.bat creates this marker first. Polling it lets hidden/task-scheduled
@@ -79,7 +84,7 @@ function exitAfterShutdown(signal, exitCode, error) {
 // forced process termination. It also closes the startup race where a stop is
 // requested while Lavalink is still warming up and Node starts a moment later.
 const stopWatcher = setInterval(() => {
-  if (!shuttingDown && fs.existsSync(stopRequestFile)) exitAfterShutdown('stop-requested', 0);
+  if (!shutdownCoordinator.isRunning() && fs.existsSync(stopRequestFile)) exitAfterShutdown('stop-requested', 0);
 }, 500);
 stopWatcher.unref?.();
 

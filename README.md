@@ -23,7 +23,7 @@ There is deliberately no public `/queue` slash command. Queue viewing is a priva
 
 - `/clear` keeps the current song playing, removes every upcoming track, cancels stale in-flight queue work, and turns loop/autoplay off so the queue stays clear.
 - `/stop` stops the current track, clears the upcoming queue and previous-track state, turns loop/autoplay off, and resets a stale paused state.
-- Async `/play`, `/ai`, radio, and autoplay work is revision-guarded so an old request cannot silently refill a queue after you clear/stop/disconnect.
+- Async `/play`, `/ai`, radio, autoplay, and `select:true` picker actions are revision-guarded so an old request cannot silently refill/reconnect after you clear/stop/disconnect.
 - The panel and `/status` label the count as **Up next** so it is not confused with the currently playing track.
 
 ## Shared Now Playing + private detailed UI
@@ -46,7 +46,7 @@ Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear �
 
 While the main `/nowplaying` JukeBox view is open, its progress/current-track/status display refreshes about every **10 seconds**. Public panels use one shared live lease per server, while private sub-views keep per-user leases so opening Queue/More never turns those details public or evicts the shared panel. Each interaction-backed lease retires after about **14 minutes** and leaves a notice telling you to press Refresh to resume. The registry is capped at 32 live panels and uses one lazy timer only while at least one live panel exists; it adds no service or audio-processing process.
 
-For ambiguous text searches, `/play ... select:true` and `/playnext ... select:true` open a private top-5 result picker for 2 minutes. Direct URLs/playlists remain immediate. The picker is bounded in memory and has no background timer.
+For ambiguous text searches, `/play ... select:true` and `/playnext ... select:true` open a private top-5 result picker for 2 minutes. Direct URLs/playlists remain immediate. The picker is bounded in memory, has no background timer, and is tied to the queue revision that created it, so an old picker cannot resurrect playback after Clear/Stop/Disconnect.
 
 The Discord voice-channel status is also updated to:
 
@@ -100,10 +100,6 @@ DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
 DISCORD_GUILD_ID=your_server_id
 
-LAVALINK_URL=localhost:2333
-LAVALINK_PASSWORD=ezmusic-local-only
-LAVALINK_SECURE=false
-
 # Optional Spotify URL metadata/mirroring (Spotify developer app required)
 SPOTIFY_CLIENT_ID=
 SPOTIFY_CLIENT_SECRET=
@@ -116,6 +112,8 @@ DEFAULT_VOLUME=80
 AUTO_DISCONNECT_MINUTES=10
 ```
 
+The bundled Lavalink connection is intentionally fixed to localhost (`127.0.0.1:2333`) with an internal local-only password so Node and `application.yml` cannot drift apart.
+
 `DEFAULT_VOLUME` is only the first/default value. Once `/volume` is used, the saved server volume remains across disconnects, bot restarts, and Windows restarts until changed again.
 
 ## First setup
@@ -126,7 +124,7 @@ Double-click:
 setup.bat
 ```
 
-It verifies Node/Java, downloads and verifies the pinned Lavalink 4.2.2 standalone jar if missing, preserves an existing `.env`, and installs Node dependencies.
+It verifies Node/Java, downloads and verifies the pinned Lavalink 4.2.2 standalone jar if missing, preserves an existing `.env`, and installs the exact locked Node dependency tree with `npm ci`.
 
 ## Visible/manual start
 
@@ -181,7 +179,7 @@ remove-autostart.bat
 stop-bot.bat
 ```
 
-For hidden mode, the stop script first requests a graceful Node/Discord/SQLite shutdown. If the exact EZ Music process does not exit in time, it safely force-stops only that matching process. Lavalink is stopped using its recorded PID only after verifying that the PID still belongs to `Lavalink.jar`.
+For hidden mode, the stop script first requests a graceful Node/Discord/SQLite shutdown. If the exact EZ Music process does not exit in time, it safely force-stops only that matching process. Lavalink is stopped using its recorded PID only after verifying both `Lavalink.jar` and an install-specific JVM marker, preventing a stale PID from targeting another Lavalink instance.
 
 ---
 
@@ -293,7 +291,7 @@ GitHub Actions validates:
 - syntax and regression tests on Windows and Ubuntu using Node 22.14.0
 - SQLite startup, persistent volume, favorites, history paging, and crash-recovery round trips
 - private/ephemeral interaction behavior
-- hidden-launcher/autostart safety checks
+- hidden-launcher/autostart safety checks, including install-specific Lavalink PID identity
 - durable queue-clear/stop race guards, queue undo, search-picker bounds, and per-guild operation serialization
 - raw-audio filter policy
 - standalone Java 17 Lavalink 4.2.2 startup

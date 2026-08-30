@@ -52,12 +52,12 @@ if not defined TARGET_PID (
   exit /b 0
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$targetPid=[int]$env:TARGET_PID; $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$targetPid) -ErrorAction SilentlyContinue; if(-not $p){exit 2}; if([string]$p.CommandLine -notmatch 'Lavalink\.jar'){Write-Host '[WARN] PID now belongs to another process; refusing to kill it.'; exit 3}; Stop-Process -Id $targetPid -Force -ErrorAction Stop; exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$targetPid=[int]$env:TARGET_PID; $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$targetPid) -ErrorAction SilentlyContinue; if(-not $p){exit 2}; $sha=[System.Security.Cryptography.SHA256]::Create(); try{$hash=$sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($env:EZ_MUSIC_ROOT.ToLowerInvariant()))}finally{$sha.Dispose()}; $instance=([BitConverter]::ToString($hash)).Replace('-','').ToLowerInvariant().Substring(0,16); $marker='-Dezmusic.instance='+$instance; $cmd=[string]$p.CommandLine; if($cmd -notmatch 'Lavalink\.jar' -or $cmd.IndexOf($marker,[StringComparison]::OrdinalIgnoreCase) -lt 0){Write-Host '[WARN] PID does not match this EZ Music Lavalink instance; refusing to kill it.'; exit 3}; Stop-Process -Id $targetPid -Force -ErrorAction Stop; exit 0"
 set "STOP_RC=%ERRORLEVEL%"
 
 if "%STOP_RC%"=="0" echo Lavalink stopped.
 if "%STOP_RC%"=="2" echo Lavalink was already stopped.
-if "%STOP_RC%"=="3" echo Lavalink PID was stale; no unrelated process was killed.
+if "%STOP_RC%"=="3" echo Lavalink PID was stale or belonged to another instance; no unrelated process was killed.
 if not "%STOP_RC%"=="0" if not "%STOP_RC%"=="2" if not "%STOP_RC%"=="3" echo [WARN] Could not stop Lavalink cleanly.
 
 del /q "%LAVALINK_PID%" >nul 2>nul

@@ -47,7 +47,9 @@ test('node shutdown is deterministic and responds to the stop marker', () => {
   assert.match(index, /exitAfterShutdown\('stop-requested', 0\)/);
   assert.match(index, /process\.once\('exit', removeOwnPidFile\)/);
   assert.match(index, /process\.once\('unhandledRejection'/);
-  assert.match(index, /finally\(\(\) => process\.exit\(exitCode\)\)/);
+  assert.match(index, /createShutdownCoordinator/);
+  assert.match(index, /shutdownCoordinator\.isRunning\(\)/);
+  assert.match(index, /finally\(\(\) => process\.exit\(requestedExitCode\)\)/);
 });
 
 test('generic Lavalink HTTP source is disabled', () => {

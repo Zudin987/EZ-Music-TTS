@@ -93,7 +93,7 @@ if not exist .env (
 )
 
 echo Installing Node dependencies...
-call npm install || (
+call npm ci || (
   echo [ERROR] npm install failed.
   pause
   exit /b 1

@@ -8,6 +8,7 @@ const storage = fs.readFileSync('src/storage.js', 'utf8');
 const utils = fs.readFileSync('src/utils.js', 'utf8');
 const index = fs.readFileSync('src/index.js', 'utf8');
 const ui = fs.readFileSync('src/ui.js', 'utf8');
+const searchPicker = fs.readFileSync('src/search-picker.js', 'utf8');
 
 test('crash recovery is SQLite-backed and opt-in instead of auto-joining voice', () => {
   assert.match(storage, /CREATE TABLE IF NOT EXISTS session_recovery/);
@@ -26,9 +27,11 @@ test('crash recovery is SQLite-backed and opt-in instead of auto-joining voice',
 
 test('search picker is opt-in and temporary', () => {
   assert.match(commands, /setName\('select'\)/);
-  assert.match(commands, /SEARCH_PICKER_TTL_MS = 120_000/);
-  assert.match(commands, /searchPickers = new Map\(\)/);
-  assert.match(commands, /tracks\.slice\(0, 5\)/);
+  assert.match(searchPicker, /SEARCH_PICKER_TTL_MS = 120_000/);
+  assert.match(searchPicker, /SEARCH_PICKER_MAX = 32/);
+  assert.match(searchPicker, /tracks: Array\.isArray\(tracks\) \? tracks\.slice\(0, 5\)/);
+  assert.match(searchPicker, /revision:/);
+  assert.match(commands, /isQueueRevisionCurrent\(interaction\.guildId, entry\.revision\)/);
 });
 
 test('favorites and recent history reuse SQLite with no new service', () => {

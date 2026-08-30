@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { createLivePanelRegistry } from './live-panel.js';
 import { MessageFlags, REST, Routes, SlashCommandBuilder, escapeMarkdown } from 'discord.js';
 import {
@@ -25,14 +24,14 @@ import {
 } from './ui.js';
 import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 import { voiceTransportQuality } from './performance.js';
+import { createSearchPickerRegistry } from './search-picker.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
 const PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications;
 const MAX_PLAYLIST_ADD = 250;
-const SEARCH_PICKER_TTL_MS = 120_000;
 const UNDO_TTL_MS = 5 * 60_000;
 const LIBRARY_PAGE_SIZE = 20;
-const searchPickers = new Map();
+const searchPickers = createSearchPickerRegistry();
 const undoSnapshots = new Map();
 
 export const commandDefinitions = [
@@ -284,29 +283,21 @@ function dedupeUpcoming(player) {
 
 function purgeTemporaryState() {
   const now = Date.now();
-  for (const [token, entry] of searchPickers) if (entry.expiresAt <= now) searchPickers.delete(token);
   for (const [guildId, entry] of undoSnapshots) if (entry.expiresAt <= now) undoSnapshots.delete(guildId);
-  while (searchPickers.size > 32) searchPickers.delete(searchPickers.keys().next().value);
 }
 
-function createSearchPicker(interaction, tracks, next) {
-  purgeTemporaryState();
-  const token = randomBytes(6).toString('base64url');
-  searchPickers.set(token, {
+function createSearchPicker(interaction, tracks, next, revision) {
+  return searchPickers.create({
     guildId: interaction.guildId,
     userId: interaction.user.id,
-    tracks: tracks.slice(0, 5),
-    next: Boolean(next),
-    expiresAt: Date.now() + SEARCH_PICKER_TTL_MS,
+    tracks,
+    next,
+    revision,
   });
-  return token;
 }
 
 function getSearchPicker(interaction, token) {
-  purgeTemporaryState();
-  const entry = searchPickers.get(token);
-  if (!entry || entry.guildId !== interaction.guildId || entry.userId !== interaction.user.id) return null;
-  return entry;
+  return searchPickers.getOwned({ guildId: interaction.guildId, userId: interaction.user.id, token });
 }
 
 function setUndoSnapshot(guildId, snapshot) {
@@ -511,7 +502,7 @@ async function editLivePanel(interaction, player, notice = null) {
 
   const componentApi = {
     music, gemini, ensurePlayer, queueTracks, queueLimit, setGuildAutoplay, getGuildAutoplay, setGuildVolume,
-    invalidateQueueWork, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession,
+    invalidateQueueWork, isQueueRevisionCurrent, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession,
     withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,
     queueLibraryRow, restoreUndo, livePanels, editLivePanel,
   };
@@ -592,7 +583,7 @@ async function editLivePanel(interaction, player, notice = null) {
           const result = await searchPreferred(music, query, interaction.user);
           if (!result?.tracks?.length) throw new Error(`No results for: ${truncate(query, 120)}`);
           if (result.type !== 'PLAYLIST' && result.tracks.length > 1) {
-            const token = createSearchPicker(interaction, result.tracks, next);
+            const token = createSearchPicker(interaction, result.tracks, next, getQueueRevision(interaction.guildId));
             return interaction.editReply(searchPickerPayload(token, result.tracks, next ? 'next' : 'play'));
           }
           // A playlist/direct URL has one unambiguous target; queue it normally.
@@ -757,16 +748,24 @@ async function handleQueueSelect(interaction, { music, queuePayload }) {
   return interaction.editReply(queuePayload(player, interaction.guildId, page, Number.isInteger(selectedIndex) ? selectedIndex : null));
 }
 
-async function handleSearchSelect(interaction, { ensurePlayer, queueTracks, queueLimit, withGuildOperation, checkpointRecovery }) {
+async function handleSearchSelect(interaction, { music, ensurePlayer, queueTracks, queueLimit, withGuildOperation, checkpointRecovery, isQueueRevisionCurrent }) {
   const token = interaction.customId.split(':')[2] || '';
   const entry = getSearchPicker(interaction, token);
   if (!entry) throw expectedError('That search picker expired. Run the command again.');
+  if (!isQueueRevisionCurrent(interaction.guildId, entry.revision)) {
+    searchPickers.delete(token);
+    throw expectedError('That search picker is stale because the queue changed. Run `/play` again.');
+  }
   const index = Number.parseInt(interaction.values?.[0], 10);
   const track = Number.isInteger(index) ? entry.tracks[index] : null;
   if (!track) throw expectedError('That search result is no longer available.');
   await interaction.deferUpdate();
   const player = await ensurePlayer(interaction);
   await withGuildOperation(interaction.guildId, async () => {
+    if (!isQueueRevisionCurrent(interaction.guildId, entry.revision) || music.players.get(interaction.guildId) !== player) {
+      searchPickers.delete(token);
+      throw expectedError('That search picker is stale because the queue changed. Run `/play` again.');
+    }
     const queued = queueTracks(player, [track], { next: entry.next, perRequestLimit: 1 });
     if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
     if (!player.playing && !player.paused) await player.play();
