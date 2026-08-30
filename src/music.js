@@ -3,6 +3,13 @@ import { Connectors } from 'shoukaku';
 import { addHistory, getAutoplayMode, getGuildVolume as getStoredVolume, recentHistory, setAutoplayMode, setGuildVolume as setStoredVolume } from './storage.js';
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 
+const MAX_UPCOMING_QUEUE = 300;
+const SOURCE_FAILURE_WINDOW_MS = 60_000;
+const SOURCE_FAILURE_THRESHOLD = 3;
+const SOURCE_RETRY_MS = 60_000;
+const SOURCE_STABLE_MS = 20_000;
+const EMPTY_VOICE_GRACE_MS = 120_000;
+
 function youtubeId(track) {
   const direct = String(track?.identifier || '').trim();
   if (/^[A-Za-z0-9_-]{11}$/.test(direct)) return direct;
@@ -34,6 +41,11 @@ export function createMusic(client, config, gemini) {
   const autoplayLocks = new Set();
   const voiceIds = new Map();
   const queueRevisions = new Map();
+  const emptyVoiceTimers = new Map();
+  const playbackFailures = new Map();
+  const heldQueues = new Map();
+  const sourceRetryTimers = new Map();
+  const sourceSuccessTimers = new Map();
 
   function getQueueRevision(guildId) {
     return queueRevisions.get(guildId) || 0;
@@ -59,6 +71,258 @@ export function createMusic(client, config, gemini) {
     return error;
   }
 
+  function queueTracks(player, tracks, { next = false, perRequestLimit = MAX_UPCOMING_QUEUE } = {}) {
+    const input = Array.isArray(tracks) ? tracks.filter(Boolean) : tracks ? [tracks] : [];
+    const available = Math.max(0, MAX_UPCOMING_QUEUE - Number(player?.queue?.length || 0));
+    const allowed = Math.max(0, Math.min(available, Number.isFinite(perRequestLimit) ? perRequestLimit : MAX_UPCOMING_QUEUE));
+    const added = input.slice(0, allowed);
+    if (added.length) {
+      if (next) player.queue.unshift(...added);
+      else player.queue.add([...added]);
+    }
+    return { added, omitted: Math.max(0, input.length - added.length), capacity: MAX_UPCOMING_QUEUE };
+  }
+
+  function getHeldQueueCount(guildId) {
+    return heldQueues.get(guildId)?.length || 0;
+  }
+
+  function clearSourceRetry(guildId) {
+    const timer = sourceRetryTimers.get(guildId);
+    if (timer) clearTimeout(timer);
+    sourceRetryTimers.delete(guildId);
+  }
+
+  function clearSourceSuccess(guildId) {
+    const timer = sourceSuccessTimers.get(guildId);
+    if (timer) clearTimeout(timer);
+    sourceSuccessTimers.delete(guildId);
+  }
+
+  function scheduleSourceSuccess(player, track) {
+    const guildId = player.guildId;
+    clearSourceSuccess(guildId);
+    const fingerprint = `${track?.identifier || ''}:${track?.title || ''}`;
+    const timer = setTimeout(() => {
+      sourceSuccessTimers.delete(guildId);
+      const current = player.queue.current;
+      const currentFingerprint = `${current?.identifier || ''}:${current?.title || ''}`;
+      if (music.players.get(guildId) === player && player.playing && currentFingerprint === fingerprint) {
+        setHealthy(guildId);
+      }
+    }, SOURCE_STABLE_MS);
+    timer.unref?.();
+    sourceSuccessTimers.set(guildId, timer);
+  }
+
+  function discardHeldQueue(guildId, resetHealth = true) {
+    const removed = getHeldQueueCount(guildId);
+    heldQueues.delete(guildId);
+    clearSourceRetry(guildId);
+    clearSourceSuccess(guildId);
+    if (resetHealth) playbackFailures.delete(guildId);
+    return removed;
+  }
+
+  function getSourceHealth(guildId) {
+    const state = playbackFailures.get(guildId);
+    if (!state) return { status: 'healthy', failures: 0, retryAt: 0, lastError: '', held: getHeldQueueCount(guildId) };
+    return {
+      status: state.status || 'healthy',
+      failures: state.times?.length || 0,
+      retryAt: state.retryAt || 0,
+      lastError: state.lastError || '',
+      held: getHeldQueueCount(guildId),
+    };
+  }
+
+  function setHealthy(guildId) {
+    clearSourceRetry(guildId);
+    clearSourceSuccess(guildId);
+    playbackFailures.delete(guildId);
+  }
+
+  function scheduleSourceRetry(player) {
+    const guildId = player.guildId;
+    clearSourceRetry(guildId);
+    const state = playbackFailures.get(guildId);
+    if (!state || state.status !== 'degraded') return;
+    const delay = Math.max(1_000, state.retryAt - Date.now());
+    const timer = setTimeout(async () => {
+      sourceRetryTimers.delete(guildId);
+      const currentPlayer = music.players.get(guildId);
+      const held = heldQueues.get(guildId) || [];
+      if (currentPlayer !== player || !held.length) {
+        if (!held.length) setHealthy(guildId);
+        return;
+      }
+
+      // Do not interrupt something the user managed to start manually. Retry
+      // when the player is idle instead of creating another race.
+      if (player.queue.current || player.playing || player.paused) {
+        const retryState = playbackFailures.get(guildId);
+        if (retryState) {
+          retryState.retryAt = Date.now() + SOURCE_RETRY_MS;
+          playbackFailures.set(guildId, retryState);
+          scheduleSourceRetry(player);
+        }
+        return;
+      }
+
+      heldQueues.delete(guildId);
+      const result = queueTracks(player, held);
+      const recovering = playbackFailures.get(guildId) || { times: [] };
+      recovering.status = 'recovering';
+      recovering.times = [];
+      recovering.retryAt = 0;
+      playbackFailures.set(guildId, recovering);
+      console.warn(`[source-protection] retrying ${result.added.length} preserved track(s) for ${guildId}`);
+      if (!result.added.length) return setHealthy(guildId);
+      try {
+        await player.play();
+      } catch (error) {
+        console.warn('[source-protection] retry failed to start', error?.message || error);
+        openSourceCircuit(player, error?.message || 'retry failed');
+      }
+    }, delay);
+    timer.unref?.();
+    sourceRetryTimers.set(guildId, timer);
+  }
+
+  function openSourceCircuit(player, message, stopCurrent = true) {
+    const guildId = player.guildId;
+    const state = playbackFailures.get(guildId) || { times: [] };
+    if (state.status === 'degraded') return;
+
+    invalidateQueueWork(guildId);
+    if (player.loop !== 'none') player.setLoop('none');
+    setAutoplayMode(guildId, 'off');
+
+    const existing = heldQueues.get(guildId) || [];
+    const upcoming = [...player.queue];
+    if (upcoming.length) {
+      player.queue.clear();
+      heldQueues.set(guildId, [...existing, ...upcoming].slice(0, MAX_UPCOMING_QUEUE));
+    }
+
+    state.status = 'degraded';
+    state.retryAt = Date.now() + SOURCE_RETRY_MS;
+    state.lastError = String(message || 'playback source error').slice(0, 500);
+    playbackFailures.set(guildId, state);
+    console.warn(`[source-protection] circuit open for ${guildId}; preserved ${getHeldQueueCount(guildId)} upcoming track(s)`);
+
+    // Force the failed current item to end only after the upcoming queue has
+    // been moved aside. Kazagumo can then emit playerEmpty without burning
+    // through the preserved queue.
+    if (stopCurrent) {
+      try { if (player.queue.current) player.skip(); } catch { /* end event may already be in flight */ }
+    }
+    scheduleSourceRetry(player);
+  }
+
+  function recordPlaybackFailure(player, message, { skipCurrent = true } = {}) {
+    const guildId = player.guildId;
+    clearSourceSuccess(guildId);
+    const now = Date.now();
+    const track = player.queue.current;
+    const fingerprint = `${track?.identifier || ''}:${track?.title || ''}`;
+    const state = playbackFailures.get(guildId) || { times: [], status: 'healthy', lastFingerprint: '', lastFailureAt: 0 };
+
+    // Lavalink can emit stuck + exception for the same failed item. Count that
+    // as one failure rather than opening the circuit twice for one track.
+    if (state.lastFingerprint === fingerprint && now - Number(state.lastFailureAt || 0) < 1_500) return state;
+    state.lastFingerprint = fingerprint;
+    state.lastFailureAt = now;
+    state.lastError = String(message || 'playback source error').slice(0, 500);
+    state.times = (state.times || []).filter((time) => now - time <= SOURCE_FAILURE_WINDOW_MS);
+    state.times.push(now);
+    playbackFailures.set(guildId, state);
+
+    const threshold = state.status === 'recovering' ? 1 : SOURCE_FAILURE_THRESHOLD;
+    if (state.times.length >= threshold) openSourceCircuit(player, state.lastError, skipCurrent);
+    else if (skipCurrent) {
+      try {
+        if (player.queue.current) {
+          if (player.loop !== 'none') player.setLoop('none');
+          player.skip();
+        }
+      } catch (error) { console.warn('[source-protection] skip failed', error?.message || error); }
+    }
+    return state;
+  }
+
+  function clearEmptyVoiceTimer(guildId) {
+    const timer = emptyVoiceTimers.get(guildId);
+    if (timer) clearTimeout(timer);
+    emptyVoiceTimers.delete(guildId);
+  }
+
+  function hasHumanListener(player) {
+    const voiceId = player?.voiceId || voiceIds.get(player?.guildId);
+    if (!voiceId) return false;
+    const channel = client.channels.cache.get(voiceId);
+    if (channel?.members?.some?.((member) => !member.user?.bot)) return true;
+
+    // Voice-state cache is available with GuildVoiceStates and does not need
+    // the privileged GuildMembers intent. Use it as a fallback so the 2-minute
+    // auto-leave timer does not depend on the full member cache.
+    const guild = client.guilds.cache.get(player.guildId);
+    return Boolean(guild?.voiceStates?.cache?.some?.((state) => {
+      if (state.channelId !== voiceId || state.id === client.user?.id) return false;
+      return client.users.cache.get(state.id)?.bot !== true;
+    }));
+  }
+
+  function evaluateVoiceOccupancy(player) {
+    if (!player || music.players.get(player.guildId) !== player) return;
+    if (hasHumanListener(player)) return clearEmptyVoiceTimer(player.guildId);
+    if (emptyVoiceTimers.has(player.guildId)) return;
+
+    const timer = setTimeout(async () => {
+      emptyVoiceTimers.delete(player.guildId);
+      if (music.players.get(player.guildId) !== player || hasHumanListener(player)) return;
+      console.log(`[voice] no human listeners for 2 minutes; disconnecting ${player.guildId}`);
+      invalidateQueueWork(player.guildId);
+      setAutoplayMode(player.guildId, 'off');
+      discardHeldQueue(player.guildId);
+      try { player.queue.clear(); } catch { /* player may already be tearing down */ }
+      try { await player.destroy(); } catch (error) { console.warn('[voice] auto-leave failed', error?.message || error); }
+    }, EMPTY_VOICE_GRACE_MS);
+    timer.unref?.();
+    emptyVoiceTimers.set(player.guildId, timer);
+  }
+
+  client.on('voiceStateUpdate', (oldState, newState) => {
+    const guildId = newState.guild?.id || oldState.guild?.id;
+    const player = guildId ? music.players.get(guildId) : null;
+    if (!player) return;
+    const voiceId = player.voiceId || voiceIds.get(guildId);
+    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
+    evaluateVoiceOccupancy(player);
+  });
+
+  function lavalinkBaseUrl() {
+    const raw = String(config.lavalinkUrl || 'localhost:2333').replace(/^https?:\/\//i, '');
+    return `${config.lavalinkSecure ? 'https' : 'http'}://${raw}`;
+  }
+
+  async function getRuntimeStats() {
+    const node = process.memoryUsage();
+    let lavalink = null;
+    try {
+      const response = await fetch(`${lavalinkBaseUrl()}/v4/stats`, {
+        headers: { Authorization: config.lavalinkPassword },
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (response.ok) lavalink = await response.json();
+    } catch { /* status remains useful even if stats endpoint is temporarily unavailable */ }
+    return {
+      node: { rss: node.rss, heapUsed: node.heapUsed, heapTotal: node.heapTotal },
+      lavalink,
+      queueLimit: MAX_UPCOMING_QUEUE,
+    };
+  }
+
   // A persisted AI mode must not survive a restart where Gemini was removed.
   if (!gemini?.enabled && getAutoplayMode(config.discordGuildId) === 'ai') {
     setAutoplayMode(config.discordGuildId, 'off');
@@ -73,23 +337,22 @@ export function createMusic(client, config, gemini) {
   });
 
   music.on('playerException', (player, data) => {
-    console.warn('[player-exception]', player.guildId, data?.exception?.message || data?.message || 'track exception');
-    try {
-      if (player.queue.current) {
-        if (player.loop !== 'none') player.setLoop('none');
-        player.skip();
-      }
-    } catch (error) { console.warn('[player-exception] skip failed', error?.message || error); }
+    const message = data?.exception?.message || data?.message || 'track exception';
+    console.warn('[player-exception]', player.guildId, message);
+    recordPlaybackFailure(player, message);
+  });
+
+  music.on('playerResolveError', (player, track, message) => {
+    const detail = message || `could not resolve ${track?.title || 'track'}`;
+    console.warn('[player-resolve-error]', player.guildId, detail);
+    // Kazagumo advances a resolve failure itself after this synchronous event.
+    recordPlaybackFailure(player, detail, { skipCurrent: false });
   });
 
   music.on('playerStuck', (player, data) => {
-    console.warn('[player-stuck]', player.guildId, data?.thresholdMs || 'unknown threshold');
-    try {
-      if (player.queue.current) {
-        if (player.loop !== 'none') player.setLoop('none');
-        player.skip();
-      }
-    } catch (error) { console.warn('[player-stuck] skip failed', error?.message || error); }
+    const message = `track stuck (${data?.thresholdMs || 'unknown'} ms)`;
+    console.warn('[player-stuck]', player.guildId, message);
+    recordPlaybackFailure(player, message);
   });
 
   music.on('playerEmpty', (player) => {
@@ -102,6 +365,8 @@ export function createMusic(client, config, gemini) {
 
   async function handlePlayerStart(player, track) {
     clearDisconnect(player.guildId);
+    clearEmptyVoiceTimer(player.guildId);
+    scheduleSourceSuccess(player, track);
     lastTracks.set(player.guildId, track);
     if (player.voiceId) voiceIds.set(player.guildId, player.voiceId);
     try {
@@ -111,6 +376,7 @@ export function createMusic(client, config, gemini) {
       console.warn('[history] unable to record track', error?.message || error);
     }
     await setVoiceStatus(player, track);
+    evaluateVoiceOccupancy(player);
   }
 
   async function handlePlayerEmpty(player) {
@@ -123,6 +389,13 @@ export function createMusic(client, config, gemini) {
       player.paused = false;
     }
     player.playing = false;
+
+    const health = getSourceHealth(player.guildId);
+    if (health.status === 'degraded' || health.status === 'recovering') {
+      await clearVoiceStatus(player);
+      scheduleDisconnect(player);
+      return;
+    }
 
     const filled = await refillAutoplay(player).catch((error) => {
       console.warn('[autoplay]', error?.message || error);
@@ -139,6 +412,9 @@ export function createMusic(client, config, gemini) {
     // that has already been destroyed/recreated.
     invalidateQueueWork(player.guildId);
     clearDisconnect(player.guildId);
+    clearEmptyVoiceTimer(player.guildId);
+    clearSourceSuccess(player.guildId);
+    discardHeldQueue(player.guildId);
     await clearVoiceStatus(player);
     voiceIds.delete(player.guildId);
     lastTracks.delete(player.guildId);
@@ -168,6 +444,12 @@ export function createMusic(client, config, gemini) {
     const voice = interaction.member?.voice?.channel;
     if (!voice) throw new Error('Join a voice channel first.');
 
+    const sourceHealth = getSourceHealth(interaction.guildId);
+    if (sourceHealth.status === 'degraded' || sourceHealth.status === 'recovering') {
+      const wait = sourceHealth.retryAt > Date.now() ? Math.ceil((sourceHealth.retryAt - Date.now()) / 1000) : 0;
+      throw queueCanceledError(`Playback source protection is ${sourceHealth.status}. ${sourceHealth.held || 0} queued track(s) are preserved${wait ? `; automatic retry in about ${wait}s` : ''}.`);
+    }
+
     let player = music.players.get(interaction.guildId);
     if (!player) {
       player = await music.createPlayer({
@@ -182,6 +464,8 @@ export function createMusic(client, config, gemini) {
       if (player.voiceId && player.voiceId !== voice.id) throw new Error('Join the same voice channel as the bot first.');
       player.setTextChannel(interaction.channelId);
     }
+
+    clearEmptyVoiceTimer(player.guildId);
 
     // Keep an idle player on a fresh timeout even if the upcoming search fails.
     // playerStart clears this timer after playback actually begins.
@@ -299,7 +583,8 @@ export function createMusic(client, config, gemini) {
       // or destroyed the player while network/AI searches were in flight.
       if (getAutoplayMode(player.guildId) !== mode || !queueRequestStillValid(player, revision)) return false;
       if (!tracks.length) return false;
-      player.queue.add([...tracks]);
+      const queued = queueTracks(player, tracks);
+      if (!queued.added.length) return false;
       if (!player.playing && !player.paused) await player.play();
       return true;
     } finally {
@@ -377,10 +662,10 @@ export function createMusic(client, config, gemini) {
 
     if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
     if (!picked.length) throw new Error('Could not build server radio from the available sources.');
-    const count = picked.length;
-    player.queue.add([...picked]);
+    const queued = queueTracks(player, picked);
+    if (!queued.added.length) throw new Error(`Queue is full (maximum ${MAX_UPCOMING_QUEUE} upcoming tracks).`);
     if (!player.playing && !player.paused) await player.play();
-    return count;
+    return queued.added.length;
   }
 
   function setGuildAutoplay(guildId, mode) {
@@ -408,5 +693,11 @@ export function createMusic(client, config, gemini) {
     getQueueRevision,
     invalidateQueueWork,
     isQueueRevisionCurrent,
+    queueTracks,
+    getQueueLimit: () => MAX_UPCOMING_QUEUE,
+    getRuntimeStats,
+    getSourceHealth,
+    getHeldQueueCount,
+    discardHeldQueue,
   };
 }
