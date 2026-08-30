@@ -65,7 +65,7 @@ Live sessions are checkpointed to the existing local SQLite database with no Red
 
 Recovery is deliberately **opt-in**: after an unexpected bot/Windows restart, EZ Music never auto-joins a voice channel. Run `/status`; if a recent (under 24 hours) session exists, private **Resume Session** and **Discard Session** buttons appear. Join the voice channel where you want playback, then press Resume. The current track and an initial batch restore first; a larger saved queue resolves in guarded background batches.
 
-A clean Discord `/stop`, `/disconnect`, natural completed queue, or 2-minute empty-room auto-leave clears obsolete recovery state. Process shutdown/restart preserves a useful live session. During a prolonged source outage, held queue state remains recoverable instead of being discarded merely because the idle player later times out.
+A clean Discord `/stop`, `/disconnect`, natural completed queue, or 2-minute empty-room auto-leave clears obsolete recovery state. Active playback pauses immediately when the last human leaves; if a human returns during that 2-minute grace window, only that automatic pause is resumed. A manual `/pause` is never auto-resumed. Process shutdown/restart preserves a useful live session. During a prolonged source outage, held queue state remains recoverable instead of being discarded merely because the idle player later times out.
 
 ## Lightweight library and race safety
 
@@ -212,13 +212,13 @@ Lavalink also enables `nonAllocatingFrameBuffer: true`, disables routine REST re
 ## Lightweight reliability features
 
 - **Queue ceiling:** maximum 300 upcoming tracks; a single playlist adds at most 250.
-- **Empty-room auto-leave:** if no human listener remains in the bot voice channel for 2 minutes, the player disconnects and frees resources.
+- **Empty-room auto-pause/leave:** when the last human listener leaves during active playback, EZ Music pauses immediately to stop unnecessary audio work. If a human returns within 2 minutes, playback resumes from that automatic pause; manual pauses stay paused. If the room remains empty for 2 minutes, the existing disconnect/reset cleanup runs.
 - **Source circuit breaker:** three early playback/resolve failures inside 60 seconds pause automatic queue consumption, disable autoplay/loop, preserve remaining upcoming tracks in memory, and retry once after a cooldown instead of burning through the whole queue. A stable track for 20 seconds resets the failure window. Preserved tracks are also included in crash-recovery checkpoints.
 - **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.
 
 # Music sources
 
-- YouTube through the maintained `youtube-source` plugin, pinned to the current August 2026 upstream playback-fix snapshot used by this bot
+- YouTube through the maintained `youtube-source` plugin, pinned to the current August 2026 upstream playback-fix snapshot used by this bot. Client order is kept short and Opus-capable: `MUSIC` (search only) → `ANDROID_VR` → `WEB` → `WEBEMBEDDED`, matching the current upstream example and avoiding known failed/restricted/transcoding-prone clients before playback.
 - SoundCloud
 - Bandcamp
 
@@ -234,7 +234,7 @@ The built-in Lavalink YouTube source is disabled. Generic arbitrary HTTP-source 
 
 - Discord gateway latency
 - Lavalink availability
-- voice-transport ping while connected
+- voice-transport ping while connected, plus a lightweight local quality grade (`Excellent` <60 ms, `Good` <120 ms, `Elevated` <200 ms, otherwise `Poor`; this is an EZ Music diagnostic heuristic, not an official Discord grade)
 - Gemini state
 - Spotify URL mirror state
 - autoplay
