@@ -35,9 +35,17 @@ CREATE INDEX IF NOT EXISTS idx_history_guild_played ON history(guild_id, played_
 CREATE TABLE IF NOT EXISTS guild_settings (
   guild_id TEXT PRIMARY KEY,
   autoplay_mode TEXT NOT NULL DEFAULT 'off',
+  volume_percent INTEGER,
   updated_at INTEGER NOT NULL
 );
 `);
+
+// Existing installs may already have guild_settings from before persistent
+// volume existed. Add the nullable column in place without touching history.
+const guildSettingColumns = db.prepare('PRAGMA table_info(guild_settings)').all();
+if (!guildSettingColumns.some((column) => column.name === 'volume_percent')) {
+  db.exec('ALTER TABLE guild_settings ADD COLUMN volume_percent INTEGER');
+}
 
 const historyStmt = db.prepare(`INSERT INTO history
 (guild_id,user_id,uri,title,author,duration_ms,played_at) VALUES (?,?,?,?,?,?,?)`);
@@ -46,10 +54,13 @@ const pruneHistoryStmt = db.prepare(`DELETE FROM history
 WHERE guild_id=? AND id NOT IN (
   SELECT id FROM history WHERE guild_id=? ORDER BY played_at DESC, id DESC LIMIT ?
 )`);
-const getSettingsStmt = db.prepare('SELECT autoplay_mode FROM guild_settings WHERE guild_id=?');
-const setSettingsStmt = db.prepare(`INSERT INTO guild_settings (guild_id, autoplay_mode, updated_at)
+const getSettingsStmt = db.prepare('SELECT autoplay_mode, volume_percent FROM guild_settings WHERE guild_id=?');
+const setAutoplayStmt = db.prepare(`INSERT INTO guild_settings (guild_id, autoplay_mode, updated_at)
 VALUES (?, ?, ?)
 ON CONFLICT(guild_id) DO UPDATE SET autoplay_mode=excluded.autoplay_mode, updated_at=excluded.updated_at`);
+const setVolumeStmt = db.prepare(`INSERT INTO guild_settings (guild_id, volume_percent, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(guild_id) DO UPDATE SET volume_percent=excluded.volume_percent, updated_at=excluded.updated_at`);
 
 let historyWrites = 0;
 let closed = false;
@@ -76,8 +87,22 @@ export function getAutoplayMode(guildId) {
 
 export function setAutoplayMode(guildId, mode) {
   if (!['off', 'standard', 'ai'].includes(mode)) throw new Error(`Invalid autoplay mode: ${mode}`);
-  setSettingsStmt.run(guildId, mode, Date.now());
+  setAutoplayStmt.run(guildId, mode, Date.now());
   return mode;
+}
+
+export function getGuildVolume(guildId, fallback = 80) {
+  const stored = getSettingsStmt.get(guildId)?.volume_percent;
+  if (Number.isInteger(stored) && stored >= 0 && stored <= 100) return stored;
+  const safeFallback = Number.parseInt(fallback, 10);
+  return Number.isFinite(safeFallback) ? Math.max(0, Math.min(100, safeFallback)) : 80;
+}
+
+export function setGuildVolume(guildId, volume) {
+  const value = Number(volume);
+  if (!Number.isInteger(value) || value < 0 || value > 100) throw new Error(`Invalid volume: ${volume}`);
+  setVolumeStmt.run(guildId, value, Date.now());
+  return value;
 }
 
 export function trackToInfo(track) {
