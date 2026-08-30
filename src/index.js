@@ -1,9 +1,31 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { createMusic } from './music.js';
 import { createInteractionHandler, registerGuildCommands } from './commands.js';
 import { GeminiDJ } from './gemini.js';
 import { closeStorage } from './storage.js';
+
+fs.mkdirSync('data', { recursive: true });
+const pidFile = path.resolve('data', 'ez-music.pid');
+
+function writePidFile() {
+  fs.writeFileSync(pidFile, String(process.pid), { encoding: 'ascii' });
+}
+
+function removeOwnPidFile() {
+  try {
+    if (!fs.existsSync(pidFile)) return;
+    const value = fs.readFileSync(pidFile, 'utf8').trim();
+    if (value === String(process.pid)) fs.unlinkSync(pidFile);
+  } catch (error) {
+    console.warn('[shutdown] PID cleanup failed', error?.message || error);
+  }
+}
+
+writePidFile();
+process.once('exit', removeOwnPidFile);
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
@@ -23,8 +45,6 @@ client.once(Events.ClientReady, async () => {
 client.on('interactionCreate', createInteractionHandler({ client, gemini, ...playerApi }));
 client.on('error', (error) => console.error('[discord]', error));
 
-process.on('unhandledRejection', (error) => console.error('[unhandledRejection]', error));
-
 let shuttingDown = false;
 async function shutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
@@ -36,15 +56,25 @@ async function shutdown(signal, exitCode = 0) {
   client.destroy();
   try { closeStorage(); }
   catch (error) { console.warn('[shutdown] storage close failed', error?.message || error); }
+  removeOwnPidFile();
 }
 
-process.once('SIGINT', () => { shutdown('SIGINT').catch((error) => console.error('[shutdown]', error)); });
-process.once('SIGTERM', () => { shutdown('SIGTERM').catch((error) => console.error('[shutdown]', error)); });
-process.once('uncaughtException', (error) => {
-  console.error('[uncaughtException]', error);
-  shutdown('uncaughtException', 1)
+function exitAfterShutdown(signal, exitCode, error) {
+  if (error) console.error(`[${signal}]`, error);
+  shutdown(signal, exitCode)
     .catch((shutdownError) => console.error('[shutdown]', shutdownError))
-    .finally(() => process.exit(1));
-});
+    .finally(() => process.exit(exitCode));
+}
 
-await client.login(config.discordToken);
+process.once('SIGINT', () => exitAfterShutdown('SIGINT', 0));
+process.once('SIGTERM', () => exitAfterShutdown('SIGTERM', 0));
+process.once('uncaughtException', (error) => exitAfterShutdown('uncaughtException', 1, error));
+process.once('unhandledRejection', (error) => exitAfterShutdown('unhandledRejection', 1, error));
+
+try {
+  await client.login(config.discordToken);
+} catch (error) {
+  console.error('[discord] login failed', error);
+  await shutdown('login-failed', 1).catch(() => {});
+  process.exit(1);
+}
