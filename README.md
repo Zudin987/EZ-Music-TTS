@@ -94,9 +94,11 @@ The project intentionally does not ship unused source plugins. This reduces star
 
 Install:
 
-1. **Node.js 22.9.0 or newer**
+1. **Node.js 22.14.0 or newer**
 2. **Docker Desktop** with Docker Compose v2
 3. **Git** (recommended, but downloading the repository ZIP also works)
+
+Node 22 releases older than 22.14 are intentionally blocked because the bundled SQLite runtime can crash on those older patch releases. A current Node 22 LTS or newer release is recommended.
 
 Start Docker Desktop before running the bot. `setup.bat` and `start-bot.bat` check the Node and Docker requirements and stop with a useful error instead of continuing on an unsupported setup.
 
@@ -347,7 +349,8 @@ Then restart with `start-bot.bat`.
 GitHub Actions runs:
 
 - Node syntax checks
-- unit/regression tests on **Ubuntu and Windows** using the minimum supported Node 22.9.0 baseline
+- a real SQLite-storage startup smoke test
+- unit/regression tests on **Ubuntu and Windows** using the minimum safe Node 22.14.0 baseline
 - a real **Lavalink Docker startup smoke test**
 - a Lavalink `/v4/info` check confirming that the YouTube plugin/source manager loaded
 
