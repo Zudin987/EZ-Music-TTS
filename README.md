@@ -11,6 +11,7 @@ A private, single-server Discord music bot focused on a polished **raw-song** ex
 - Gemini never sits in the audio path; normal music still works if Gemini is unavailable or out of quota.
 - The Now Playing panel is intentionally JukeBox-like: compact status, artwork, Up Next, and the controls people actually use.
 - Song metadata cannot ping server members/roles because Discord mentions are disabled globally for bot output.
+- Listening history stays local in `data/ez-music.sqlite` and is bounded to the newest 5,000 entries per server.
 
 ## Slash commands
 
@@ -66,8 +67,12 @@ It clears the status when playback stops or the bot leaves. Give the bot the **S
 
 - Standard autoplay tries source recommendations and then a search-based fallback.
 - AI autoplay asks Gemini for a small continuation queue based on recent server listening history.
+- If AI autoplay cannot get usable Gemini results, it falls back to standard recommendations instead of immediately leaving the channel silent.
 - `/radio server` builds a longer queue from server listening history and can use Gemini as an optional enhancement.
+- Server radio prefers older listening-history tracks as its last-resort fallback instead of failing just because recommendations are temporarily unavailable.
+- AI/search resolution uses small parallel batches to avoid making every lookup wait for the previous one.
 - Autoplay modes are mutually exclusive: enabling standard autoplay disables AI autoplay and vice versa.
+- If Gemini is removed from `.env`, a previously saved AI-autoplay state is reset to Off on restart.
 - If Gemini fails, times out, or reaches quota, the playback engine remains independent.
 
 ## Music sources
@@ -89,11 +94,11 @@ The project intentionally does not ship unused source plugins. This reduces star
 
 Install:
 
-1. **Node.js 22 or newer**
-2. **Docker Desktop**
+1. **Node.js 22.9.0 or newer**
+2. **Docker Desktop** with Docker Compose v2
 3. **Git** (recommended, but downloading the repository ZIP also works)
 
-Start Docker Desktop before running the bot.
+Start Docker Desktop before running the bot. `setup.bat` and `start-bot.bat` check the Node and Docker requirements and stop with a useful error instead of continuing on an unsupported setup.
 
 ## 2. Create the Discord bot
 
@@ -143,15 +148,15 @@ GEMINI_MODEL=gemini-3.5-flash-lite
 
 Leave `GEMINI_API_KEY` empty if you do not want AI features. Everything else still works.
 
-## 4. Configure `.env`
+## 4. One-time setup
 
-The easiest route on Windows is to double-click:
+Double-click:
 
 ```text
 setup.bat
 ```
 
-It creates `.env` if needed and installs Node dependencies.
+It checks Node.js/Docker, creates `.env` if needed, and installs Node dependencies.
 
 Then open `.env` in Notepad and fill it in:
 
@@ -173,19 +178,16 @@ AUTO_DISCONNECT_MINUTES=10
 
 Do not add quotes around ordinary token/ID values.
 
-## 5. Start the bot
+## 5. Normal daily start
 
-Double-click:
+For normal use later:
 
-```text
-start-bot.bat
-```
+1. Start **Docker Desktop**.
+2. Double-click `start-bot.bat`.
+3. Wait until the window says `Lavalink is ready.` and then shows the Discord login/registration logs.
+4. Join a Discord voice channel and use `/play`.
 
-It will:
-
-1. start Lavalink in Docker
-2. install Node dependencies if they are missing
-3. start EZ Music
+`start-bot.bat` now waits up to 45 seconds for Lavalink to actually accept connections before launching the Discord process. If Lavalink does not become ready, it prints the recent Lavalink logs instead of starting the bot into a broken state.
 
 Or do it manually from PowerShell in the project folder:
 
@@ -194,6 +196,8 @@ docker compose up -d
 npm install
 npm start
 ```
+
+The batch launcher is preferred because it performs prerequisite/readiness checks automatically.
 
 Guild-only slash commands are registered on startup and normally appear in the configured server very quickly.
 
@@ -208,6 +212,8 @@ Join the voice channel where you want the bot, then try:
 
 Expected result:
 
+- Discord says Online
+- Lavalink says Connected
 - the bot joins your voice channel
 - the song starts
 - a compact Now Playing panel appears
@@ -217,10 +223,11 @@ Expected result:
 Then test:
 
 ```text
-/playnext <song>
+/playnext another song
 /shuffle
 /loop track
 /skip
+/volume 50
 /autoplay on
 ```
 
@@ -239,6 +246,8 @@ For server radio, first build a little listening history by playing several trac
 /radio server
 ```
 
+The first real Discord test should also check a playlist URL, Previous, Queue button, Stop, Disconnect, and at least one full song transition into autoplay.
+
 ## 7. Stop the bot
 
 In the bot console, press:
@@ -247,7 +256,7 @@ In the bot console, press:
 Ctrl+C
 ```
 
-That stops the Discord bot cleanly. Lavalink runs separately in Docker. To stop it too, double-click:
+That stops the Discord bot cleanly and closes its local SQLite database. Lavalink runs separately in Docker. To stop Lavalink too, double-click:
 
 ```text
 stop-bot.bat
@@ -263,6 +272,16 @@ docker compose down
 
 # Troubleshooting
 
+### `start-bot.bat` says Lavalink did not become ready
+
+The launcher already prints the latest Lavalink logs. You can also run:
+
+```powershell
+docker compose logs --tail 100 lavalink
+```
+
+If Docker Desktop was still starting, wait until Docker reports that its engine is running and try again.
+
 ### `/status` says Lavalink unavailable
 
 Make sure Docker Desktop is running, then:
@@ -272,7 +291,7 @@ docker compose up -d
 docker compose logs --tail 100 lavalink
 ```
 
-The CI pipeline also boots the real Lavalink container as a smoke test so invalid plugin/client configuration is caught before release.
+The CI pipeline boots the real Lavalink container and verifies that the YouTube plugin/source manager actually loaded.
 
 ### Bot joins but cannot play
 
@@ -294,7 +313,7 @@ Put your Google AI Studio API key in `GEMINI_API_KEY`, save `.env`, and restart 
 
 ### Gemini fails or times out
 
-Normal `/play` and all ordinary controls still work. AI requests have a timeout so a slow Gemini call cannot hang the bot indefinitely.
+Normal `/play` and all ordinary controls still work. AI requests have a timeout, and AI autoplay can fall back to normal source recommendations.
 
 ### Buttons say to join the bot's voice channel
 
@@ -319,7 +338,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Then restart the bot.
+Then restart with `start-bot.bat`.
 
 ---
 
@@ -328,7 +347,8 @@ Then restart the bot.
 GitHub Actions runs:
 
 - Node syntax checks
-- unit/regression tests on **Ubuntu and Windows**
+- unit/regression tests on **Ubuntu and Windows** using the minimum supported Node 22.9.0 baseline
 - a real **Lavalink Docker startup smoke test**
+- a Lavalink `/v4/info` check confirming that the YouTube plugin/source manager loaded
 
 The pull request stays Draft until real playback is also tested in the target Discord server.
