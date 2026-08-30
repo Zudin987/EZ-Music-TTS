@@ -1,5 +1,17 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from 'discord.js';
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  ModalBuilder,
+  StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  escapeMarkdown,
+} from 'discord.js';
 import { formatDuration, truncate } from './utils.js';
+
+const QUEUE_PAGE_SIZE = 25;
 
 function prettyLoop(loop) {
   if (loop === 'track') return 'Track';
@@ -24,6 +36,34 @@ function safeHttpUrl(value) {
   } catch {
     return null;
   }
+}
+
+function queueFingerprint(track) {
+  const input = `${track?.identifier || ''}\u0000${track?.uri || ''}\u0000${track?.author || ''}\u0000${track?.title || ''}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function clampPage(total, page) {
+  const pages = Math.max(1, Math.ceil(Math.max(0, total) / QUEUE_PAGE_SIZE));
+  return Math.max(0, Math.min(pages - 1, Number.parseInt(page, 10) || 0));
+}
+
+function progressText(track, player) {
+  const length = Math.max(0, Number(track?.length || 0));
+  const rawPosition = Number(player?.position || 0);
+  const position = Number.isFinite(rawPosition) ? Math.max(0, Math.min(length || Number.MAX_SAFE_INTEGER, rawPosition)) : 0;
+  if (!length || track?.isStream) return track?.isStream ? '`LIVE`' : `\`${formatDuration(position)}\``;
+
+  const width = 12;
+  const ratio = Math.max(0, Math.min(1, position / length));
+  const marker = Math.min(width - 1, Math.floor(ratio * width));
+  const bar = Array.from({ length: width }, (_, index) => (index === marker ? '●' : '━')).join('');
+  return `\`${formatDuration(position)} ${bar} ${formatDuration(length)}\``;
 }
 
 export function playerButtons(player, autoplayMode = 'off') {
@@ -51,6 +91,7 @@ export function playerButtons(player, autoplayMode = 'off') {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('music:volume_down').setLabel('Vol -').setEmoji('🔉').setStyle(ButtonStyle.Secondary).setDisabled(volume <= 0),
       new ButtonBuilder().setCustomId('music:volume_up').setLabel('Vol +').setEmoji('🔊').setStyle(ButtonStyle.Secondary).setDisabled(volume >= 100),
+      new ButtonBuilder().setCustomId('music:more').setLabel('More').setEmoji('⚙️').setStyle(ButtonStyle.Secondary).setDisabled(!hasCurrent),
       new ButtonBuilder().setCustomId('music:refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
     ),
   ];
@@ -66,7 +107,7 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
 
   const embed = new EmbedBuilder()
     .setTitle('🎵 Now Playing')
-    .setDescription(`**${title}**`)
+    .setDescription(`**${title}**\n${progressText(track, player)}`)
     .addFields(
       { name: '🎙️ Artist', value: safeText(track?.author || 'Unknown', 100), inline: true },
       { name: '⏱️ Duration', value: formatDuration(track?.length || 0), inline: true },
@@ -81,6 +122,100 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
   const thumbnail = safeHttpUrl(track?.thumbnail);
   if (thumbnail) embed.setThumbnail(thumbnail);
   return embed;
+}
+
+export function queueManagerPayload(player, page = 0, selectedIndex = null, notice = null) {
+  const total = Number(player?.queue?.length || 0);
+  const safePage = clampPage(total, page);
+  const pages = Math.max(1, Math.ceil(total / QUEUE_PAGE_SIZE));
+  const start = safePage * QUEUE_PAGE_SIZE;
+  const pageTracks = [...(player?.queue || [])].slice(start, start + QUEUE_PAGE_SIZE);
+  const current = player?.queue?.current;
+  const selected = Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < total ? player.queue[selectedIndex] : null;
+
+  const lines = ['**📜 Private Queue Manager**'];
+  if (current) lines.push(`Now: **${safeText(current.title, 70)}** — ${safeText(current.author, 35)}`);
+  lines.push(`Up next: **${total}** • Page **${safePage + 1}/${pages}**`);
+  if (selected) lines.push(`Selected #${selectedIndex + 1}: **${safeText(selected.title, 70)}** — ${safeText(selected.author, 35)}`);
+  if (notice) lines.push('', safeText(notice, 600));
+  if (!total) lines.push('', 'Nothing is queued.');
+  else lines.push('', 'Select a track below to remove it, move it next, or play it now.');
+
+  const components = [];
+  if (pageTracks.length) {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`music:qselect:${safePage}`)
+      .setPlaceholder('Choose an upcoming track')
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(pageTracks.map((track, offset) => ({
+        label: truncate(`${start + offset + 1}. ${String(track?.title || 'Unknown title')}`, 100),
+        description: truncate(`${String(track?.author || 'Unknown')} • ${formatDuration(track?.length || 0)}`, 100),
+        value: String(start + offset),
+      })));
+    components.push(new ActionRowBuilder().addComponents(menu));
+  }
+
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`music:qpage:${safePage - 1}`).setLabel('Prev Page').setEmoji('◀️').setStyle(ButtonStyle.Secondary).setDisabled(safePage <= 0),
+    new ButtonBuilder().setCustomId(`music:qpage:${safePage + 1}`).setLabel('Next Page').setEmoji('▶️').setStyle(ButtonStyle.Secondary).setDisabled(safePage >= pages - 1),
+    new ButtonBuilder().setCustomId(`music:qdedupe:${safePage}`).setLabel('Dedupe').setEmoji('🧽').setStyle(ButtonStyle.Secondary).setDisabled(total < 2),
+    new ButtonBuilder().setCustomId(`music:qrefresh:${safePage}`).setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('music:qback').setLabel('Player').setEmoji('🎵').setStyle(ButtonStyle.Secondary),
+  ));
+
+  if (selected) {
+    components.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`music:qremove:${selectedIndex}:${safePage}:${queueFingerprint(selected)}`).setLabel('Remove').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`music:qnext:${selectedIndex}:${safePage}:${queueFingerprint(selected)}`).setLabel('Move Next').setEmoji('⬆️').setStyle(ButtonStyle.Secondary).setDisabled(selectedIndex === 0),
+      new ButtonBuilder().setCustomId(`music:qplay:${selectedIndex}:${safePage}:${queueFingerprint(selected)}`).setLabel('Play Now').setEmoji('▶️').setStyle(ButtonStyle.Primary),
+    ));
+  }
+
+  return { content: lines.join('\n'), embeds: [], components };
+}
+
+export function playbackToolsPayload(player, autoplayMode = 'off', notice = null) {
+  const track = player?.queue?.current;
+  if (!track) return { content: 'Nothing is playing.', embeds: [], components: [] };
+  const seekable = track?.isSeekable !== false && !track?.isStream;
+  const rawPosition = Number(player?.position || 0);
+  const position = Number.isFinite(rawPosition) ? Math.max(0, rawPosition) : 0;
+  const length = Math.max(0, Number(track?.length || 0));
+
+  return {
+    content: notice ? safeText(notice, 600) : '**⚙️ Playback Tools** • progress is a snapshot; press Refresh to update it.',
+    embeds: [nowPlayingEmbed(track, player, autoplayMode)],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('music:seekdelta:-30000').setLabel('-30s').setEmoji('⏪').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || position <= 0),
+        new ButtonBuilder().setCustomId('music:seekdelta:-10000').setLabel('-10s').setEmoji('↩️').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || position <= 0),
+        new ButtonBuilder().setCustomId('music:replay').setLabel('Replay').setEmoji('🔁').setStyle(ButtonStyle.Primary).setDisabled(!seekable),
+        new ButtonBuilder().setCustomId('music:seekdelta:10000').setLabel('+10s').setEmoji('↪️').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || (length > 0 && position >= length)),
+        new ButtonBuilder().setCustomId('music:seekdelta:30000').setLabel('+30s').setEmoji('⏩').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || (length > 0 && position >= length)),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('music:seekmodal').setLabel('Seek…').setEmoji('🎯').setStyle(ButtonStyle.Secondary).setDisabled(!seekable),
+        new ButtonBuilder().setCustomId('music:more_refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('music:back').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
+}
+
+export function seekModal() {
+  const input = new TextInputBuilder()
+    .setCustomId('position')
+    .setLabel('Position (seconds, M:SS, or H:MM:SS)')
+    .setPlaceholder('Example: 1:37')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(12);
+
+  return new ModalBuilder()
+    .setCustomId('music:seeksubmit')
+    .setTitle('Seek in current song')
+    .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
 export function queueText(player, max = 20, maxChars = 1850) {
