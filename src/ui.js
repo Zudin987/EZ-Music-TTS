@@ -2,17 +2,24 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ContainerBuilder,
   EmbedBuilder,
+  MessageFlags,
   ModalBuilder,
+  SectionBuilder,
+  SeparatorBuilder,
   StringSelectMenuBuilder,
+  TextDisplayBuilder,
   TextInputBuilder,
   TextInputStyle,
+  ThumbnailBuilder,
   escapeMarkdown,
 } from 'discord.js';
 import { formatDuration, truncate } from './utils.js';
 
 const QUEUE_PAGE_SIZE = 25;
 const LIBRARY_PAGE_SIZE = 20;
+const JUKEBOX_ACCENT = 0x4CC2FF;
 
 function prettyLoop(loop) {
   if (loop === 'track') return 'Track';
@@ -65,6 +72,80 @@ function progressText(track, player) {
   const marker = Math.min(width - 1, Math.floor(ratio * width));
   const bar = Array.from({ length: width }, (_, index) => (index === marker ? '●' : '━')).join('');
   return `\`${formatDuration(position)} ${bar} ${formatDuration(length)}\``;
+}
+
+
+function componentsV2Payload(container) {
+  return {
+    content: null,
+    embeds: [],
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+  };
+}
+
+function addRows(container, rows) {
+  for (const row of rows || []) container.addActionRowComponents(row);
+  return container;
+}
+
+function textContainerPayload(lines, rows = [], accent = JUKEBOX_ACCENT) {
+  const text = Array.isArray(lines) ? lines.join('\n') : String(lines || '');
+  const container = new ContainerBuilder().setAccentColor(accent);
+  if (text) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(text));
+  if (rows.length) container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
+  addRows(container, rows);
+  return componentsV2Payload(container);
+}
+
+function trackContainerPayload(track, player, autoplayMode, rows, { heading = '🎵 Now Playing', notice = null } = {}) {
+  const requester = track?.requester?.displayName || track?.requester?.globalName || track?.requester?.username || 'Unknown';
+  const title = safeText(track?.title || 'Unknown title', 220);
+  const uri = safeHttpUrl(track?.uri || track?.realUri);
+  const next = player?.queue?.[0];
+  const queueCount = Number(player?.queue?.length || 0);
+  const queueDuration = Number(player?.queue?.durationLength || 0);
+  const titleLine = uri ? `**[${title}](${uri})**` : `**${title}**`;
+  const body = [
+    `### ${heading}`,
+    titleLine,
+    progressText(track, player),
+    '',
+    `🎙️ **Artist:** ${safeText(track?.author || 'Unknown', 100)}`,
+    `⏱️ **Duration:** ${formatDuration(track?.length || 0)}`,
+    `👤 **Requester:** ${safeText(requester, 100)}`,
+  ];
+  if (next) body.push('', `⏭️ **Up Next:** ${safeText(next.title, 90)} • ${formatDuration(next.length || 0)}`);
+
+  const container = new ContainerBuilder().setAccentColor(JUKEBOX_ACCENT);
+  if (notice) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`> ${safeText(notice, 600)}`));
+
+  const thumbnail = safeHttpUrl(track?.thumbnail);
+  if (thumbnail) {
+    const section = new SectionBuilder()
+      .addTextDisplayComponents(new TextDisplayBuilder().setContent(body.join('\n')))
+      .setThumbnailAccessory(new ThumbnailBuilder().setURL(thumbnail));
+    container.addSectionComponents(section);
+  } else {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body.join('\n')));
+  }
+
+  container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
+  container.addTextDisplayComponents(new TextDisplayBuilder().setContent(
+    `🔊 **Volume:** ${Math.round(player?.volume ?? 0)}%  •  🔁 **Loop:** ${prettyLoop(player?.loop)}  •  🔄 **Autoplay:** ${prettyAutoplay(autoplayMode)}  •  📜 **Up next:** ${queueCount}${queueDuration > 0 ? ` (${formatDuration(queueDuration)})` : ''}`,
+  ));
+  if (rows?.length) container.addSeparatorComponents(new SeparatorBuilder().setDivider(true));
+  addRows(container, rows);
+  return componentsV2Payload(container);
+}
+
+function idleContainerPayload(notice = null, heading = '⏹️ Playback Idle') {
+  return textContainerPayload([
+    `### ${heading}`,
+    notice ? safeText(notice, 900) : 'Nothing is playing right now.',
+    '',
+    'Use `/play` to start music, or open your library below.',
+  ], statusButtons());
 }
 
 export function playerButtons(player, autoplayMode = 'off', { canUndo = false } = {}) {
@@ -132,6 +213,13 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
   return embed;
 }
 
+
+export function jukeboxPlayerPayload(player, autoplayMode = 'off', notice = null, { canUndo = false } = {}) {
+  const track = player?.queue?.current;
+  if (!track) return idleContainerPayload(notice);
+  return trackContainerPayload(track, player, autoplayMode, playerButtons(player, autoplayMode, { canUndo }), { notice });
+}
+
 export function queueManagerPayload(player, page = 0, selectedIndex = null, notice = null, { canUndo = false } = {}) {
   const total = Number(player?.queue?.length || 0);
   const safePage = clampPage(total, page, QUEUE_PAGE_SIZE);
@@ -185,7 +273,7 @@ export function queueManagerPayload(player, page = 0, selectedIndex = null, noti
     ));
   }
 
-  return { content: lines.join('\n'), embeds: [], components };
+  return textContainerPayload(lines, components);
 }
 
 export function undoButtonComponents() {
@@ -196,32 +284,31 @@ export function undoButtonComponents() {
 
 export function playbackToolsPayload(player, autoplayMode = 'off', notice = null) {
   const track = player?.queue?.current;
-  if (!track) return { content: 'Nothing is playing.', embeds: [], components: statusButtons() };
+  if (!track) return idleContainerPayload(notice, '⚙️ Playback Tools');
   const seekable = track?.isSeekable !== false && !track?.isStream;
   const rawPosition = Number(player?.position || 0);
   const position = Number.isFinite(rawPosition) ? Math.max(0, rawPosition) : 0;
   const length = Math.max(0, Number(track?.length || 0));
-
-  return {
-    content: notice ? safeText(notice, 600) : '**⚙️ Playback Tools** • progress is a snapshot; press Refresh to update it.',
-    embeds: [nowPlayingEmbed(track, player, autoplayMode)],
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('music:seekdelta:-30000').setLabel('-30s').setEmoji('⏪').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || position <= 0),
-        new ButtonBuilder().setCustomId('music:seekdelta:-10000').setLabel('-10s').setEmoji('↩️').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || position <= 0),
-        new ButtonBuilder().setCustomId('music:replay').setLabel('Replay').setEmoji('🔁').setStyle(ButtonStyle.Primary).setDisabled(!seekable),
-        new ButtonBuilder().setCustomId('music:seekdelta:10000').setLabel('+10s').setEmoji('↪️').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || (length > 0 && position >= length)),
-        new ButtonBuilder().setCustomId('music:seekdelta:30000').setLabel('+30s').setEmoji('⏩').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || (length > 0 && position >= length)),
-      ),
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('music:seekmodal').setLabel('Seek…').setEmoji('🎯').setStyle(ButtonStyle.Secondary).setDisabled(!seekable),
-        new ButtonBuilder().setCustomId('music:history').setLabel('History').setEmoji('🕘').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:favorites').setLabel('Favorites').setEmoji('❤️').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:more_refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('music:back').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
-      ),
-    ],
-  };
+  const rows = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('music:seekdelta:-30000').setLabel('-30s').setEmoji('⏪').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || position <= 0),
+      new ButtonBuilder().setCustomId('music:seekdelta:-10000').setLabel('-10s').setEmoji('↩️').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || position <= 0),
+      new ButtonBuilder().setCustomId('music:replay').setLabel('Replay').setEmoji('🔁').setStyle(ButtonStyle.Primary).setDisabled(!seekable),
+      new ButtonBuilder().setCustomId('music:seekdelta:10000').setLabel('+10s').setEmoji('↪️').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || (length > 0 && position >= length)),
+      new ButtonBuilder().setCustomId('music:seekdelta:30000').setLabel('+30s').setEmoji('⏩').setStyle(ButtonStyle.Secondary).setDisabled(!seekable || (length > 0 && position >= length)),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('music:seekmodal').setLabel('Seek…').setEmoji('🎯').setStyle(ButtonStyle.Secondary).setDisabled(!seekable),
+      new ButtonBuilder().setCustomId('music:history').setLabel('History').setEmoji('🕘').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:favorites').setLabel('Favorites').setEmoji('❤️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:more_refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:back').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+  return trackContainerPayload(track, player, autoplayMode, rows, {
+    heading: '⚙️ Playback Tools',
+    notice: notice || 'Progress is a snapshot; press Refresh to update it.',
+  });
 }
 
 export function seekModal() {
@@ -305,7 +392,7 @@ function libraryPayload(kind, rows, total, page = 0, selectedId = null, notice =
     else actionRow.addComponents(new ButtonBuilder().setCustomId(`music:hfavorite:${selected.id}:${safePage}`).setLabel('Favorite').setEmoji('❤️').setStyle(ButtonStyle.Secondary));
     components.push(actionRow);
   }
-  return { content: lines.join('\n'), embeds: [], components };
+  return textContainerPayload(lines, components);
 }
 
 export function historyPayload(rows, total, page = 0, selectedId = null, notice = null) {

@@ -14,9 +14,8 @@ import {
 import {
   favoritesPayload,
   historyPayload,
-  nowPlayingEmbed,
+  jukeboxPlayerPayload,
   playbackToolsPayload,
-  playerButtons,
   queueManagerPayload,
   searchPickerPayload,
   seekModal,
@@ -64,8 +63,14 @@ export async function registerGuildCommands(config) {
 }
 
 function privateReply(interaction, content, extra = {}) {
-  const payload = { flags: PRIVATE_FLAGS, ...extra };
-  if (content !== undefined && content !== null) payload.content = content;
+  const extraFlags = Number(extra.flags || 0);
+  const payload = { ...extra, flags: PRIVATE_FLAGS | extraFlags };
+  if (extraFlags & MessageFlags.IsComponentsV2) {
+    delete payload.content;
+    delete payload.embeds;
+  } else if (content !== undefined && content !== null) {
+    payload.content = content;
+  }
   return interaction.reply(payload);
 }
 
@@ -74,13 +79,7 @@ function privateDefer(interaction) {
 }
 
 function playerPanelPayload(player, autoplayMode, notice = null, { canUndo = false } = {}) {
-  const track = player?.queue?.current;
-  if (!track) return { content: notice || 'Nothing is playing.', embeds: [], components: [] };
-  return {
-    content: notice,
-    embeds: [nowPlayingEmbed(track, player, autoplayMode)],
-    components: playerButtons(player, autoplayMode, { canUndo }),
-  };
+  return jukeboxPlayerPayload(player, autoplayMode, notice, { canUndo });
 }
 
 function getPlayer(music, guildId) {
@@ -750,8 +749,7 @@ async function handleButton(interaction, api) {
     await interaction.deferUpdate();
     const player = music.players.get(interaction.guildId);
     if (player?.queue?.current) return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId)));
-    const recovery = getRecoverableSession(interaction.guildId);
-    return interaction.editReply({ content: 'Library closed. Use `/status` for full bot health.', embeds: [], components: statusButtons({ hasRecovery: Boolean(recovery) }) });
+    return interaction.editReply(playbackToolsPayload(null, getGuildAutoplay(interaction.guildId), 'Library closed. Use `/status` for full bot health.'));
   }
   if (action === 'spcancel') {
     const token = parts[2] || '';
@@ -913,7 +911,7 @@ async function handleButton(interaction, api) {
       clearUndoSnapshot(interaction.guildId);
       const removed = await stopAndResetPlayer(player, interaction.guildId, queueControls);
       clearRecoverySession(interaction.guildId);
-      return interaction.editReply({ content: `Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`, embeds: [], components: statusButtons() });
+      return interaction.editReply(panelPayload(player, interaction.guildId, `⏹️ Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`));
     } else if (action === 'loop') {
       const next = player.loop === 'none' ? 'track' : player.loop === 'track' ? 'queue' : 'none';
       player.setLoop(next);

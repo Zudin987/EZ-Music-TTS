@@ -34,7 +34,7 @@ Run:
 /nowplaying
 ```
 
-The response is visible only to you. It shows artwork, title, artist, duration, requester, Up Next, saved volume, loop, autoplay, and upcoming count.
+The response is visible only to you. The player uses Discord Components V2: artwork, metadata, status, and every control button live inside one colored JukeBox container instead of buttons floating below a legacy embed.
 
 Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · Favorite · More · Refresh
 
