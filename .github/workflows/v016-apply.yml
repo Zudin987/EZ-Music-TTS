@@ -1,0 +1,52 @@
+name: Apply v0.1.6 performance pass
+
+on:
+  push:
+    branches:
+      - perf/v016-empty-voice-clients-status
+    paths:
+      - .github/workflows/v016-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: perf/v016-empty-voice-clients-status
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - name: Apply performance patch
+        run: python3 .github/scripts/v016_patch.py
+      - name: Install dependencies
+        run: npm install --package-lock=false
+      - name: Syntax check
+        run: npm run check
+      - name: Tests
+        run: npm test
+      - name: Verify performance invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+          ! grep -q '^      - IOS$' lavalink/application.yml
+          ! grep -q '^      - TVHTML5_SIMPLY$' lavalink/application.yml
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md package.json lavalink/application.yml src/music.js src/commands.js src/performance.js test/lean-runtime.test.js test/performance-v016.test.js test/source-routing.test.js
+          git commit -m 'perf: auto-pause empty voice and streamline playback path'
+          git push origin HEAD:perf/v016-empty-voice-clients-status
