@@ -3,6 +3,7 @@ node_modules/
 data/
 logs/
 *.log
+*.pid
 .DS_Store
 Thumbs.db
 lavalink/plugins/

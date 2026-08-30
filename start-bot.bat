@@ -1,6 +1,11 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
+
+set "LAVALINK_JAR=%CD%\lavalink\Lavalink.jar"
+set "LAVALINK_PID=%CD%\lavalink\lavalink.pid"
+set "LAVALINK_LOG=%CD%\lavalink\lavalink.log"
+set "LAVALINK_ERROR_LOG=%CD%\lavalink\lavalink-error.log"
 
 if not exist .env (
   echo [ERROR] .env is missing. Run setup.bat first.
@@ -13,21 +18,25 @@ where node >nul 2>nul || (
   pause
   exit /b 1
 )
-
 node -e "const [M,m]=process.versions.node.split('.').map(Number);process.exit(M>22||(M===22&&m>=14)?0:1)" || (
   for /f "delims=" %%V in ('node -p "process.versions.node"') do echo [ERROR] Node.js %%V is too old. Version 22.14.0 or newer is required.
   pause
   exit /b 1
 )
 
-where docker >nul 2>nul || (
-  echo [ERROR] Docker is not available. Start/install Docker Desktop first.
+where java >nul 2>nul || (
+  echo [ERROR] Java 17 or newer is not available. Run setup.bat after installing Java.
+  pause
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$o=(& java -version 2^>^&1 ^| Out-String); $m=[regex]::Match($o,'version\s+\"(?^<major^>\d+)'); if(-not $m.Success -or [int]$m.Groups['major'].Value -lt 17){ exit 1 }" || (
+  echo [ERROR] Java 17 or newer is required.
   pause
   exit /b 1
 )
 
-docker compose version >nul 2>nul || (
-  echo [ERROR] Docker Compose v2 is not available. Update Docker Desktop.
+if not exist "%LAVALINK_JAR%" (
+  echo [ERROR] lavalink\Lavalink.jar is missing. Run setup.bat first.
   pause
   exit /b 1
 )
@@ -37,31 +46,65 @@ if not exist node_modules (
   call npm install || exit /b 1
 )
 
-echo Starting Lavalink...
-docker compose up -d || (
-  echo [ERROR] Lavalink failed to start. Is Docker Desktop running?
+call :lavalink_ready
+if not errorlevel 1 (
+  echo Lavalink is already running and ready on 127.0.0.1:2333.
+  goto start_bot
+)
+
+call :port_open
+if not errorlevel 1 (
+  echo [ERROR] Port 2333 is already in use, but it is not the expected EZ Music Lavalink server.
+  echo Close the program using port 2333, then try again.
+  pause
+  exit /b 1
+)
+
+if exist "%LAVALINK_PID%" del /q "%LAVALINK_PID%" >nul 2>nul
+if exist "%LAVALINK_LOG%" move /Y "%LAVALINK_LOG%" "%CD%\lavalink\lavalink-old.log" >nul 2>nul
+if exist "%LAVALINK_ERROR_LOG%" move /Y "%LAVALINK_ERROR_LOG%" "%CD%\lavalink\lavalink-error-old.log" >nul 2>nul
+
+echo Starting native Lavalink (no Docker)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$work=Join-Path $env:CD 'lavalink'; $out=Join-Path $work 'lavalink.log'; $err=Join-Path $work 'lavalink-error.log'; $pidFile=Join-Path $work 'lavalink.pid'; $p=Start-Process -FilePath 'java' -ArgumentList '-Xms128M','-Xmx512M','-jar','Lavalink.jar' -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii; Write-Host ('Lavalink PID: '+$p.Id)" || (
+  echo [ERROR] Could not start Lavalink.
   pause
   exit /b 1
 )
 
 echo Waiting for Lavalink to become ready...
-set /a LAVALINK_ATTEMPT=0
-:wait_lavalink
-set /a LAVALINK_ATTEMPT+=1
-powershell -NoProfile -Command "try { $c = New-Object Net.Sockets.TcpClient('127.0.0.1',2333); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>nul && goto lavalink_ready
-if %LAVALINK_ATTEMPT% GEQ 45 goto lavalink_failed
-timeout /t 1 /nobreak >nul
-goto wait_lavalink
+for /L %%A in (1,1,60) do (
+  call :lavalink_ready
+  if not errorlevel 1 goto lavalink_ready_label
+  timeout /t 1 /nobreak >nul
+)
 
-:lavalink_failed
-echo [ERROR] Lavalink did not become ready within 45 seconds.
-echo Recent Lavalink logs:
-docker compose logs --tail 80 lavalink
+echo [ERROR] Lavalink did not become ready within 60 seconds.
+echo.
+echo Recent Lavalink output:
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if(Test-Path -LiteralPath $env:LAVALINK_LOG){Get-Content -LiteralPath $env:LAVALINK_LOG -Tail 50}; if(Test-Path -LiteralPath $env:LAVALINK_ERROR_LOG){Get-Content -LiteralPath $env:LAVALINK_ERROR_LOG -Tail 50}"
+call stop-bot.bat /quiet >nul 2>nul
 pause
 exit /b 1
 
-:lavalink_ready
+:lavalink_ready_label
 echo Lavalink is ready.
+
+:start_bot
 echo Starting EZ Music...
-echo Press Ctrl+C to stop the Discord bot. Lavalink can be stopped later with stop-bot.bat.
-call npm start
+echo Press Ctrl+C to stop the Discord bot. Then run stop-bot.bat if Lavalink remains running.
+echo.
+node src\index.js
+set "BOT_EXIT=%ERRORLEVEL%"
+echo.
+echo EZ Music exited with code %BOT_EXIT%.
+echo Stopping the Lavalink process started by this folder...
+call stop-bot.bat /quiet
+exit /b %BOT_EXIT%
+
+:lavalink_ready
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:2333/version' -Headers @{Authorization='ezmusic-local-only'} -TimeoutSec 2; if($r.StatusCode -eq 200){exit 0} } catch {}; exit 1" >nul 2>nul
+exit /b %ERRORLEVEL%
+
+:port_open
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $c=New-Object Net.Sockets.TcpClient('127.0.0.1',2333); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>nul
+exit /b %ERRORLEVEL%

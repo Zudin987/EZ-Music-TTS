@@ -1,6 +1,7 @@
 server:
   port: 2333
-  address: 0.0.0.0
+  # Native Windows setup: never expose Lavalink to the LAN.
+  address: 127.0.0.1
 
 lavalink:
   plugins:
@@ -36,8 +37,6 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    # Recommended/current youtube-source clients for 1.18.x.
-    # MUSIC is useful for search; the other clients provide playback/fallbacks.
     clients:
       - MUSIC
       - ANDROID_VR
