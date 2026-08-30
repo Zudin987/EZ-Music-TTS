@@ -36,11 +36,15 @@ test('launcher and stop script track the Discord process safely', () => {
   assert.match(stop, /src\\index\.js/i);
   assert.match(stop, /\$isEzBot=/);
   assert.doesNotMatch(stop, /\$matches=/i);
+  assert.match(stop, /Graceful stop timed out/i);
   assert.match(stop, /Stop-Process/i);
 });
 
-test('node shutdown is deterministic and cleans its PID file', () => {
+test('node shutdown is deterministic and responds to the stop marker', () => {
   assert.match(index, /ez-music\.pid/);
+  assert.match(index, /stop\.requested/);
+  assert.match(index, /setInterval\([\s\S]*fs\.existsSync\(stopRequestFile\)/);
+  assert.match(index, /exitAfterShutdown\('stop-requested', 0\)/);
   assert.match(index, /process\.once\('exit', removeOwnPidFile\)/);
   assert.match(index, /process\.once\('unhandledRejection'/);
   assert.match(index, /finally\(\(\) => process\.exit\(exitCode\)\)/);
