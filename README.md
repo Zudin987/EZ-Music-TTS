@@ -1,1 +1,293 @@
-# EZ-Music-TTS
+# EZ Music
+
+Private single-server Discord music bot focused on raw/original playback, a clean text channel, a private JukeBox-style player panel, server radio, autoplay, and an optional Gemini AI DJ.
+
+## Design rules
+
+- Raw/original playback first.
+- No nightcore, karaoke, 8D, EQ, pitch, speed, bass boost, distortion, or other DSP effects.
+- Normal volume control is retained and saved persistently per server.
+- All slash-command replies and the player panel are ephemeral/private to the person using them, so the music text channel can stay empty.
+- Gemini is optional and never sits in the audio path; normal music still works if Gemini is unavailable.
+- Lavalink runs natively on Windows. Docker and WSL are not required.
+- Lavalink binds to `127.0.0.1` only and generic HTTP-source playback is disabled.
+- Listening history stays local in `data/ez-music.sqlite` and is bounded to the newest 5,000 entries per server.
+
+## Commands
+
+`/play` · `/playnext` · `/pause` · `/resume` · `/skip` · `/previous` · `/stop` · `/disconnect` · `/volume` · `/nowplaying` · `/clear` · `/shuffle` · `/loop` · `/autoplay` · `/radio server` · `/ai` · `/help` · `/ping` · `/status`
+
+There is deliberately no public `/queue` slash command. Queue viewing is a private button on the player panel.
+
+### Queue behavior
+
+- `/clear` keeps the current song playing, removes every upcoming track, cancels stale in-flight queue work, and turns loop/autoplay off so the queue stays clear.
+- `/stop` stops the current track, clears the upcoming queue and previous-track state, turns loop/autoplay off, and resets a stale paused state.
+- Async `/play`, `/ai`, radio, and autoplay work is revision-guarded so an old request cannot silently refill a queue after you clear/stop/disconnect.
+- The panel and `/status` label the count as **Up next** so it is not confused with the currently playing track.
+
+## Private player UI
+
+Run:
+
+```text
+/nowplaying
+```
+
+The response is visible only to you. It shows artwork, title, artist, duration, requester, Up Next, saved volume, loop, autoplay, and upcoming count.
+
+Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · Favorite · More · Refresh
+
+`Queue` opens a private Queue Manager with 25-track pages, a track selector, Remove, Move Next, Play Now, stronger duplicate cleanup, and refresh/back controls. Clear/Remove/Dedupe keep one bounded **5-minute Undo** snapshot so accidental queue changes can be reversed without another service.
+
+`Favorite` saves/removes the currently displayed song from your personal SQLite favorites. The button is fingerprinted to the displayed track, so an old private panel cannot accidentally favorite a different song after the track changes.
+
+`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers. The progress bar is a static snapshot and updates only when the private panel is refreshed, so there is no background message-update timer.
+
+For ambiguous text searches, `/play ... select:true` and `/playnext ... select:true` open a private top-5 result picker for 2 minutes. Direct URLs/playlists remain immediate. The picker is bounded in memory and has no background timer.
+
+The Discord voice-channel status is also updated to:
+
+```text
+Playing: Song Title • Artist
+```
+
+Grant the bot **Set Voice Channel Status** permission for this feature.
+
+---
+
+
+## Crash/restart recovery
+
+Live sessions are checkpointed to the existing local SQLite database with no Redis/MongoDB or extra process. The snapshot contains the current track, saved position, up to 300 upcoming/preserved tracks, volume, loop/autoplay state, and paused state. Position-only checkpoints are throttled to roughly every 15 seconds so the bot does not constantly rewrite the whole queue.
+
+Recovery is deliberately **opt-in**: after an unexpected bot/Windows restart, EZ Music never auto-joins a voice channel. Run `/status`; if a recent (under 24 hours) session exists, private **Resume Session** and **Discard Session** buttons appear. Join the voice channel where you want playback, then press Resume. The current track and an initial batch restore first; a larger saved queue resolves in guarded background batches.
+
+A clean Discord `/stop`, `/disconnect`, natural completed queue, or 2-minute empty-room auto-leave clears obsolete recovery state. Process shutdown/restart preserves a useful live session. During a prolonged source outage, held queue state remains recoverable instead of being discarded merely because the idle player later times out.
+
+## Lightweight library and race safety
+
+- **Recent History:** private browser over the existing bounded 5,000-entry server history, with Play / Play Next / Favorite actions.
+- **Favorites:** personal per-user favorites stored in SQLite; no additional daemon or cache.
+- **Stronger dedupe:** normalizes common upload labels such as Official Video/Audio, Lyrics, Topic and VEVO while keeping meaningful variants such as Live, Remix, Acoustic, Instrumental, Sped Up and Slowed distinct.
+- **Per-guild operation serialization:** destructive queue/playback changes are serialized so rapid button/command bursts cannot mutate the same queue concurrently.
+- **First-player creation guard:** simultaneous first-use commands share one voice-player creation promise, preventing duplicate Shoukaku/Kazagumo connection races.
+
+---
+
+# Windows setup — no Docker
+
+## Requirements
+
+- Node.js **22.14.0 or newer**
+- Java **17 or newer**
+
+Check:
+
+```bat
+node -v
+java -version
+```
+
+## `.env`
+
+Only the three Discord values are mandatory. Gemini is optional.
+
+```dotenv
+DISCORD_TOKEN=your_bot_token
+DISCORD_CLIENT_ID=your_application_id
+DISCORD_GUILD_ID=your_server_id
+
+LAVALINK_URL=localhost:2333
+LAVALINK_PASSWORD=ezmusic-local-only
+LAVALINK_SECURE=false
+
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.5-flash-lite
+
+DEFAULT_VOLUME=80
+AUTO_DISCONNECT_MINUTES=10
+```
+
+`DEFAULT_VOLUME` is only the first/default value. Once `/volume` is used, the saved server volume remains across disconnects, bot restarts, and Windows restarts until changed again.
+
+## First setup
+
+Double-click:
+
+```text
+setup.bat
+```
+
+It verifies Node/Java, downloads and verifies the pinned Lavalink 4.2.2 standalone jar if missing, preserves an existing `.env`, and installs Node dependencies.
+
+## Visible/manual start
+
+```text
+start-bot.bat
+```
+
+The launcher starts Lavalink as a hidden Java process with a bounded heap, waits for localhost port 2333 to become healthy, then runs the Discord bot in the visible console.
+
+## Fully hidden start
+
+```text
+start-hidden.vbs
+```
+
+No console window is shown. Launcher output is written to:
+
+```text
+logs\launcher.log
+```
+
+The hidden log rotates at 5 MiB so unattended operation does not grow it forever.
+
+## Automatic start with Task Scheduler
+
+Double-click:
+
+```text
+install-autostart.bat
+```
+
+This creates a task named **EZ Music Bot** that:
+
+- runs when the current Windows user signs in
+- launches through `start-hidden.vbs`
+- uses limited/current-user privileges, not SYSTEM
+- stores no Windows password
+- ignores duplicate starts
+- can restart after unexpected failures
+
+If Windows reports Access Denied, run `install-autostart.bat` as administrator once.
+
+Remove it later with:
+
+```text
+remove-autostart.bat
+```
+
+## Stop everything
+
+```text
+stop-bot.bat
+```
+
+For hidden mode, the stop script first requests a graceful Node/Discord/SQLite shutdown. If the exact EZ Music process does not exit in time, it safely force-stops only that matching process. Lavalink is stopped using its recorded PID only after verifying that the PID still belongs to `Lavalink.jar`.
+
+---
+
+# Playback stability
+
+Lavalink uses a single-server stability buffer profile:
+
+```yaml
+nonAllocatingFrameBuffer: true
+bufferDurationMs: 1000
+frameBufferDurationMs: 10000
+youtubePlaylistLoadLimit: 3
+```
+
+These are buffering controls, not audio effects. They do not alter pitch, speed, EQ, or the source recording. The extra headroom is intended to absorb short source/network/GC hiccups, especially near track startup.
+
+The low-memory launcher uses:
+
+```text
+Lavalink: -Xms64M -Xmx256M
+Node: --max-old-space-size=128
+```
+
+Lavalink also enables `nonAllocatingFrameBuffer: true`, disables routine REST request logging, and limits YouTube playlist loading to 3 pages. The bot separately caps the live upcoming queue at **300 tracks** and a single playlist request at **250 tracks**. These controls are intended to keep the single-server stack comfortably lean; JVM heap limits are not identical to total Windows process working-set RAM.
+
+---
+
+## Lightweight reliability features
+
+- **Queue ceiling:** maximum 300 upcoming tracks; a single playlist adds at most 250.
+- **Empty-room auto-leave:** if no human listener remains in the bot voice channel for 2 minutes, the player disconnects and frees resources.
+- **Source circuit breaker:** three early playback/resolve failures inside 60 seconds pause automatic queue consumption, disable autoplay/loop, preserve remaining upcoming tracks in memory, and retry once after a cooldown instead of burning through the whole queue. A stable track for 20 seconds resets the failure window. Preserved tracks are also included in crash-recovery checkpoints.
+- **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.
+
+# Music sources
+
+- YouTube through the maintained `youtube-source` plugin, pinned to the current August 2026 upstream playback-fix snapshot used by this bot
+- SoundCloud
+- Bandcamp
+
+The built-in Lavalink YouTube source is disabled. Generic arbitrary HTTP-source playback is also disabled for host/LAN safety.
+
+---
+
+# Status and latency
+
+`/ping` reports **Discord gateway** latency only.
+
+`/status` separates:
+
+- Discord gateway latency
+- Lavalink availability
+- voice-transport ping while connected
+- Gemini state
+- autoplay
+- saved volume
+- player state
+- current song
+- Up Next count and loop mode
+- Node RSS / heap usage
+- Lavalink JVM memory stats
+- playback-source health / preserved-queue protection state
+- recoverable-session controls when the bot is disconnected
+- private Recent History and Favorites entry points
+
+This avoids treating gateway ping as if it were the actual audio/voice latency.
+
+---
+
+# Troubleshooting
+
+### Lavalink does not become ready
+
+Check:
+
+```text
+lavalink\lavalink.log
+lavalink\lavalink-error.log
+```
+
+### Hidden bot is not responding
+
+Check:
+
+```text
+logs\launcher.log
+```
+
+### Bot joins but cannot play YouTube
+
+YouTube changes periodically. Check the Lavalink logs first; the repository pins a newer upstream `youtube-source` snapshot when the latest formal release is behind YouTube changes.
+
+### Voice-channel song status does not appear
+
+Grant **Set Voice Channel Status** to the bot role and reconnect/restart playback.
+
+### `/ai` says Gemini is not configured
+
+Put a Google AI Studio API key in `GEMINI_API_KEY` and restart the bot.
+
+---
+
+# Development validation
+
+GitHub Actions validates:
+
+- syntax and regression tests on Windows and Ubuntu using Node 22.14.0
+- SQLite startup, persistent volume, favorites, history paging, and crash-recovery round trips
+- private/ephemeral interaction behavior
+- hidden-launcher/autostart safety checks
+- durable queue-clear/stop race guards, queue undo, search-picker bounds, and per-guild operation serialization
+- raw-audio filter policy
+- standalone Java 17 Lavalink 4.2.2 startup
+- YouTube plugin/source-manager loading through `/v4/info`
+
+PR #1 remains Draft until the real Discord voice/audio/UI acceptance pass is complete.

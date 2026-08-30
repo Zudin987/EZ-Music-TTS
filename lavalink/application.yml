@@ -1,0 +1,75 @@
+server:
+  port: 2333
+  # Native Windows setup: never expose Lavalink to the LAN.
+  address: 127.0.0.1
+
+lavalink:
+  plugins:
+    # youtube-source 1.18.2 predates YouTube playback changes from 2026-08-18/19.
+    # Pin the latest upstream fix snapshot currently used by this bot.
+    - dependency: "dev.lavalink.youtube:youtube-plugin:f45bbb7aebfcbc1c553769e04af6cd43afa8b7c3"
+      snapshot: true
+  server:
+    password: "ezmusic-local-only"
+    sources:
+      youtube: false
+      bandcamp: true
+      soundcloud: true
+      twitch: false
+      vimeo: false
+      nico: false
+      # Generic HTTP playback is disabled: private Discord users should not be
+      # able to make Lavalink fetch arbitrary URLs from the host/LAN.
+      http: false
+      local: false
+    # Raw-song policy: volume is the only enabled audio control.
+    filters:
+      volume: true
+      equalizer: false
+      karaoke: false
+      timescale: false
+      tremolo: false
+      vibrato: false
+      distortion: false
+      rotation: false
+      channelMix: false
+      lowPass: false
+
+    # Stability profile for a single private bot. These are buffering controls,
+    # not DSP/audio effects: they do not alter pitch, speed, EQ, or the source.
+    # More headroom helps absorb short source/network/GC hiccups at track start.
+    nonAllocatingFrameBuffer: true
+    bufferDurationMs: 1000
+    frameBufferDurationMs: 10000
+    trackStuckThresholdMs: 10000
+    # 3 pages x ~100 tracks keeps huge YouTube playlists from creating large
+    # transient responses on a machine with a strict RAM budget.
+    youtubePlaylistLoadLimit: 3
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    # MUSIC is search-only. Playback falls through the maintained anonymous
+    # clients with the August 2026 Android/iOS/TV fixes.
+    clients:
+      - MUSIC
+      - ANDROID
+      - IOS
+      - TVHTML5_SIMPLY
+      - ANDROID_MUSIC
+      - ANDROID_VR
+      - MWEB
+      - WEB
+      - WEBEMBEDDED
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO
+  # Local private node: REST request logs add noise and allocations without
+  # helping normal operation. Re-enable temporarily only while debugging.
+  request:
+    enabled: false

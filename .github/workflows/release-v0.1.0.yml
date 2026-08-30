@@ -1,0 +1,74 @@
+name: Publish EZ Music v0.1.0
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build clean Windows install ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.0"
+          ROOT="dist/EZ-Music"
+          mkdir -p "$ROOT/src" "$ROOT/lavalink"
+
+          cp README.md package.json .env.example setup.bat start-bot.bat start-hidden.vbs stop-bot.bat install-autostart.bat install-autostart.ps1 remove-autostart.bat "$ROOT/"
+          cp src/*.js "$ROOT/src/"
+          cp lavalink/application.yml "$ROOT/lavalink/"
+
+          cat > "$ROOT/CLEAN-INSTALL.txt" <<'EOF'
+          EZ MUSIC CLEAN INSTALL
+          ======================
+          1. Extract this ZIP to C:\EZ-Music
+          2. Restore your backed-up .env into C:\EZ-Music\.env, or copy .env.example to .env and fill it in.
+          3. Run setup.bat.
+          4. Test with start-bot.bat.
+          5. When satisfied, use start-hidden.vbs and install-autostart.bat if desired.
+
+          This package intentionally contains no .env, database, node_modules, or Lavalink.jar.
+          setup.bat installs/downloads the required runtime files.
+          EOF
+
+          cd dist
+          zip -r -9 "EZ-Music-${VERSION}-Windows-Clean.zip" EZ-Music >/dev/null
+          sha256sum "EZ-Music-${VERSION}-Windows-Clean.zip" > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.0 >/dev/null 2>&1; then
+            echo "Release v0.1.0 already exists; leaving it unchanged."
+          else
+            gh release create v0.1.0 \
+              dist/EZ-Music-v0.1.0-Windows-Clean.zip \
+              dist/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title "EZ Music v0.1.0" \
+              --notes "Initial stable EZ Music release. Native Windows Node + Lavalink setup with private Discord controls, raw playback, persistent volume, Favorites/History, queue manager and undo, opt-in crash recovery, source failure protection, hidden startup/Task Scheduler support, and the low-memory profile.\n\nFor a completely clean install, back up only your existing .env, extract EZ-Music-v0.1.0-Windows-Clean.zip to C:\\EZ-Music, restore .env, then run setup.bat. The release package intentionally excludes secrets, the SQLite database, node_modules, and Lavalink.jar."
+          fi
+
+      - name: Remove merged and temporary branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          for branch in \
+            feature/initial-music-bot \
+            internal/library-recovery-clean \
+            internal/apply-library-recovery
+          do
+            git push origin --delete "$branch" || true
+          done

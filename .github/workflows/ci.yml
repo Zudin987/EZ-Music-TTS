@@ -1,0 +1,80 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - run: npm install
+      - name: Smoke-test SQLite storage
+        run: node -e "import('./src/storage.js').then(({ closeStorage }) => closeStorage())"
+      - run: npm run check
+      - run: npm test
+
+  lavalink-smoke:
+    timeout-minutes: 6
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Standalone Lavalink + YouTube plugin smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 \
+            https://github.com/lavalink-devs/Lavalink/releases/download/4.2.2/Lavalink.jar \
+            -o lavalink/Lavalink.jar
+          echo '8cb801e591072c3689fafd71ccf571a95a4ead3cc35dfc045e157d763d89119a  lavalink/Lavalink.jar' | sha256sum -c -
+
+          cd lavalink
+          java -Xms128M -Xmx512M -jar Lavalink.jar > ../lavalink-ci.log 2>&1 &
+          LL_PID=$!
+          trap 'kill "$LL_PID" 2>/dev/null || true; wait "$LL_PID" 2>/dev/null || true' EXIT
+
+          ready=0
+          for attempt in {1..90}; do
+            if curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/version >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo 'Lavalink did not become ready in time.' >&2
+            tail -n 120 ../lavalink-ci.log >&2 || true
+            exit 1
+          fi
+
+          curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/v4/info > /tmp/lavalink-info.json
+          python3 - <<'PY'
+          import json
+          with open('/tmp/lavalink-info.json', encoding='utf-8') as f:
+              info = json.load(f)
+          plugins = [str(item.get('name', '')).lower() for item in info.get('plugins', [])]
+          sources = [str(item).lower() for item in info.get('sourceManagers', [])]
+          assert any('youtube' in name for name in plugins), f'YouTube plugin missing: {plugins}'
+          assert any('youtube' in name for name in sources), f'YouTube source manager missing: {sources}'
+          print('Standalone Lavalink and YouTube source manager loaded.')
+          PY
+      - name: Show Lavalink logs on failure
+        if: failure()
+        run: tail -n 160 lavalink-ci.log || true
