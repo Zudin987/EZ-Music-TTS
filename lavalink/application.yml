@@ -5,10 +5,9 @@ server:
 
 lavalink:
   plugins:
-    # 1.18.2 predates YouTube client breakages from 2026-08-18/19.
-    # Pin the upstream snapshot after the Android/iOS/TV playback fixes, but
-    # before the later experimental itag-18 length change.
-    - dependency: "dev.lavalink.youtube:youtube-plugin:b33460b38ad13b5cd07da75e46444397cf0ea2df"
+    # youtube-source 1.18.2 predates YouTube playback changes from 2026-08-18/19.
+    # Pin the latest upstream fix snapshot currently used by this bot.
+    - dependency: "dev.lavalink.youtube:youtube-plugin:f45bbb7aebfcbc1c553769e04af6cd43afa8b7c3"
       snapshot: true
   server:
     password: "ezmusic-local-only"
@@ -19,7 +18,9 @@ lavalink:
       twitch: false
       vimeo: false
       nico: false
-      http: true
+      # Generic HTTP playback is disabled: private Discord users should not be
+      # able to make Lavalink fetch arbitrary URLs from the host/LAN.
+      http: false
       local: false
     # Raw-song policy: volume is the only enabled audio control.
     filters:
@@ -40,8 +41,8 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    # MUSIC is search-only. ANDROID and IOS include upstream fixes from
-    # 2026-08-18/19; the rest remain anonymous fallbacks.
+    # MUSIC is search-only. Playback falls through the maintained anonymous
+    # clients with the August 2026 Android/iOS/TV fixes.
     clients:
       - MUSIC
       - ANDROID
