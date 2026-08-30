@@ -1,8 +1,6 @@
-import { MessageFlags } from 'discord.js';
 import { Kazagumo } from 'kazagumo';
 import { Connectors } from 'shoukaku';
 import { addHistory, getAutoplayMode, recentHistory, setAutoplayMode } from './storage.js';
-import { nowPlayingEmbed, playerButtons } from './ui.js';
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 
 function youtubeId(track) {
@@ -32,7 +30,6 @@ export function createMusic(client, config, gemini) {
   });
 
   const disconnectTimers = new Map();
-  const panelMessages = new Map();
   const lastTracks = new Map();
   const autoplayLocks = new Set();
   const voiceIds = new Map();
@@ -49,8 +46,6 @@ export function createMusic(client, config, gemini) {
   music.on('playerStart', (player, track) => {
     void handlePlayerStart(player, track).catch((error) => console.warn('[player-start]', error?.message || error));
   });
-
-  music.on('queueUpdate', (player) => refreshPanel(player).catch(() => {}));
 
   music.on('playerException', (player, data) => {
     console.warn('[player-exception]', player.guildId, data?.exception?.message || data?.message || 'track exception');
@@ -91,7 +86,6 @@ export function createMusic(client, config, gemini) {
       console.warn('[history] unable to record track', error?.message || error);
     }
     await setVoiceStatus(player, track);
-    await refreshPanel(player, { createIfMissing: true });
   }
 
   async function handlePlayerEmpty(player) {
@@ -101,7 +95,6 @@ export function createMusic(client, config, gemini) {
     });
     if (!filled && music.players.get(player.guildId) === player) {
       await clearVoiceStatus(player);
-      await removePanel(player.guildId);
       scheduleDisconnect(player);
     }
   }
@@ -109,7 +102,6 @@ export function createMusic(client, config, gemini) {
   async function handlePlayerDestroy(player) {
     clearDisconnect(player.guildId);
     await clearVoiceStatus(player);
-    await removePanel(player.guildId);
     voiceIds.delete(player.guildId);
     lastTracks.delete(player.guildId);
     autoplayLocks.delete(player.guildId);
@@ -173,38 +165,6 @@ export function createMusic(client, config, gemini) {
     const voiceId = player?.voiceId || voiceIds.get(player?.guildId);
     if (!voiceId) return;
     await client.rest.put(`/channels/${voiceId}/voice-status`, { body: { status: null } }).catch(() => {});
-  }
-
-  async function refreshPanel(player, { createIfMissing = false, forceNew = false } = {}) {
-    const track = player?.queue?.current;
-    if (!track) return null;
-    const autoplayMode = getAutoplayMode(player.guildId);
-    const payload = { embeds: [nowPlayingEmbed(track, player, autoplayMode)], components: playerButtons(player, autoplayMode) };
-    const existing = panelMessages.get(player.guildId);
-
-    if (!forceNew && existing) {
-      const edited = await existing.edit(payload).catch(() => null);
-      if (edited) return edited;
-      panelMessages.delete(player.guildId);
-    }
-
-    if (!createIfMissing && !forceNew) return null;
-    const channel = player.textId ? client.channels.cache.get(player.textId) : null;
-    if (!channel?.isTextBased()) return null;
-    const sent = await channel.send({ ...payload, flags: MessageFlags.SuppressNotifications }).catch(() => null);
-    if (sent) panelMessages.set(player.guildId, sent);
-    return sent;
-  }
-
-  async function showPanel(player) {
-    await removePanel(player.guildId);
-    return refreshPanel(player, { createIfMissing: true, forceNew: true });
-  }
-
-  async function removePanel(guildId) {
-    const message = panelMessages.get(guildId);
-    panelMessages.delete(guildId);
-    if (message) await message.delete().catch(() => {});
   }
 
   async function resolveQueries(player, queries, requester, seen = new Set(), limit = 5, concurrency = 3) {
@@ -369,16 +329,12 @@ export function createMusic(client, config, gemini) {
   function setGuildAutoplay(guildId, mode) {
     if (mode === 'ai' && !gemini?.enabled) throw new Error('Gemini is not configured, so AI autoplay cannot be enabled.');
     setAutoplayMode(guildId, mode);
-    const player = music.players.get(guildId);
-    if (player) refreshPanel(player).catch(() => {});
     return mode;
   }
 
   return {
     music,
     ensurePlayer,
-    showPanel,
-    refreshPanel,
     startServerRadio,
     setGuildAutoplay,
     getGuildAutoplay: getAutoplayMode,
