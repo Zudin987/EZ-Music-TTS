@@ -36,7 +36,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Standalone Lavalink + YouTube plugin smoke test
+      - name: Standalone Lavalink + YouTube/LavaSrc plugin smoke test
         shell: bash
         run: |
           set -euo pipefail
@@ -60,7 +60,7 @@ jobs:
           done
           if [ "$ready" -ne 1 ]; then
             echo 'Lavalink did not become ready in time.' >&2
-            tail -n 120 ../lavalink-ci.log >&2 || true
+            tail -n 160 ../lavalink-ci.log >&2 || true
             exit 1
           fi
 
@@ -72,9 +72,10 @@ jobs:
           plugins = [str(item.get('name', '')).lower() for item in info.get('plugins', [])]
           sources = [str(item).lower() for item in info.get('sourceManagers', [])]
           assert any('youtube' in name for name in plugins), f'YouTube plugin missing: {plugins}'
+          assert any('lavasrc' in name for name in plugins), f'LavaSrc plugin missing: {plugins}'
           assert any('youtube' in name for name in sources), f'YouTube source manager missing: {sources}'
-          print('Standalone Lavalink and YouTube source manager loaded.')
+          print('Standalone Lavalink, YouTube source manager, and LavaSrc plugin loaded.')
           PY
       - name: Show Lavalink logs on failure
         if: failure()
-        run: tail -n 160 lavalink-ci.log || true
+        run: tail -n 200 lavalink-ci.log || true
