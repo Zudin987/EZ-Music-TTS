@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: '22.14.0'
           package-manager-cache: false
-      - run: npm install
+      - run: npm ci
       - name: Smoke-test SQLite storage
         run: node -e "import('./src/storage.js').then(({ closeStorage }) => closeStorage())"
       - run: npm run check
@@ -62,7 +62,7 @@ jobs:
           echo '8cb801e591072c3689fafd71ccf571a95a4ead3cc35dfc045e157d763d89119a  lavalink/Lavalink.jar' | sha256sum -c -
 
           cd lavalink
-          java -Xms128M -Xmx512M -jar Lavalink.jar > ../lavalink-ci.log 2>&1 &
+          java -Xms64M -Xmx256M -jar Lavalink.jar > ../lavalink-ci.log 2>&1 &
           LL_PID=$!
           trap 'kill "$LL_PID" 2>/dev/null || true; wait "$LL_PID" 2>/dev/null || true' EXIT
 

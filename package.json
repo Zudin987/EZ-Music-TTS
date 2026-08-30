@@ -1,6 +1,6 @@
 {
   "name": "ez-music",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "description": "Private single-server Discord music bot with raw playback and optional Gemini AI DJ.",
@@ -9,12 +9,12 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/commands.js && node --check src/music.js && node --check src/storage.js && node --check src/gemini.js && node --check src/ui.js && node --check src/utils.js && node --check src/source-routing.js && node --check src/live-panel.js && node --check src/performance.js",
+    "check": "node --check src/index.js && node --check src/commands.js && node --check src/music.js && node --check src/storage.js && node --check src/gemini.js && node --check src/ui.js && node --check src/utils.js && node --check src/source-routing.js && node --check src/live-panel.js && node --check src/performance.js && node --check src/search-picker.js && node --check src/shutdown.js",
     "test": "node --test"
   },
   "dependencies": {
     "@google/genai": "2.19.0",
-    "better-sqlite3": "13.0.3",
+    "better-sqlite3": "12.11.1",
     "discord.js": "14.27.0",
     "dotenv": "17.4.2",
     "kazagumo": "3.4.3",

@@ -16,9 +16,11 @@ export const config = {
   discordToken: required('DISCORD_TOKEN'),
   discordClientId: required('DISCORD_CLIENT_ID'),
   discordGuildId: required('DISCORD_GUILD_ID'),
-  lavalinkUrl: process.env.LAVALINK_URL?.trim() || 'localhost:2333',
-  lavalinkPassword: process.env.LAVALINK_PASSWORD?.trim() || 'ezmusic-local-only',
-  lavalinkSecure: (process.env.LAVALINK_SECURE ?? 'false').toLowerCase() === 'true',
+  // Bundled Lavalink is a fixed localhost-only service. Keeping one source of
+  // truth avoids a misleading .env value that would desync Node from application.yml.
+  lavalinkUrl: 'localhost:2333',
+  lavalinkPassword: 'ezmusic-local-only',
+  lavalinkSecure: false,
   spotifyClientId: process.env.SPOTIFY_CLIENT_ID?.trim() || '',
   spotifyClientSecret: process.env.SPOTIFY_CLIENT_SECRET?.trim() || '',
   geminiApiKey: process.env.GEMINI_API_KEY?.trim() || '',
