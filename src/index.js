@@ -5,8 +5,8 @@ import { createInteractionHandler, registerGuildCommands } from './commands.js';
 import { GeminiDJ } from './gemini.js';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-const { music, ensurePlayer } = createMusic(client, config);
 const gemini = new GeminiDJ(config.geminiApiKey, config.geminiModel);
+const playerApi = createMusic(client, config, gemini);
 
 client.once('ready', async () => {
   console.log(`[discord] logged in as ${client.user.tag}`);
@@ -16,7 +16,7 @@ client.once('ready', async () => {
   console.log(`[gemini] ${gemini.enabled ? `enabled (${config.geminiModel})` : 'disabled'}`);
 });
 
-client.on('interactionCreate', createInteractionHandler({ music, ensurePlayer, gemini }));
+client.on('interactionCreate', createInteractionHandler({ client, gemini, ...playerApi }));
 client.on('error', (error) => console.error('[discord]', error));
 
 process.on('unhandledRejection', (error) => console.error('[unhandledRejection]', error));
