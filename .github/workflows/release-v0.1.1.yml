@@ -1,0 +1,75 @@
+name: Publish EZ Music v0.1.1
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 15f71f716316e58fa88174a9b48b0ba5d03780bc
+
+      - name: Build clean Windows install ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.1"
+          ROOT="dist/EZ-Music"
+          mkdir -p "$ROOT/src" "$ROOT/lavalink"
+
+          cp README.md package.json .env.example setup.bat start-bot.bat start-hidden.vbs stop-bot.bat install-autostart.bat install-autostart.ps1 remove-autostart.bat "$ROOT/"
+          cp src/*.js "$ROOT/src/"
+          cp lavalink/application.yml "$ROOT/lavalink/"
+
+          cat > "$ROOT/CLEAN-INSTALL.txt" <<'EOF'
+          EZ MUSIC v0.1.1 CLEAN INSTALL
+          ============================
+          1. Back up your existing C:\EZ-Music\.env.
+          2. Stop EZ Music and remove the old C:\EZ-Music folder for a truly clean install.
+          3. Extract this ZIP so the app lives at C:\EZ-Music.
+          4. Restore your backed-up .env to C:\EZ-Music\.env.
+          5. Run setup.bat.
+          6. Test with start-bot.bat.
+          7. When satisfied, use start-hidden.vbs; reinstall Task Scheduler only if needed.
+
+          v0.1.1 changes the private player to Discord Components V2 so artwork,
+          metadata and control buttons appear together inside one JukeBox-style card.
+
+          This package intentionally contains no .env, SQLite database,
+          node_modules, or Lavalink.jar. setup.bat installs/downloads runtime files.
+          EOF
+
+          cd dist
+          zip -r -9 "EZ-Music-${VERSION}-Windows-Clean.zip" EZ-Music >/dev/null
+          sha256sum "EZ-Music-${VERSION}-Windows-Clean.zip" > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.1 >/dev/null 2>&1; then
+            echo "Release v0.1.1 already exists; leaving it unchanged."
+          else
+            gh release create v0.1.1 \
+              dist/EZ-Music-v0.1.1-Windows-Clean.zip \
+              dist/SHA256SUMS.txt \
+              --target 15f71f716316e58fa88174a9b48b0ba5d03780bc \
+              --title "EZ Music v0.1.1" \
+              --notes "JukeBox UI update. The private Now Playing player now uses Discord Components V2 so artwork, metadata, progress/status and all player controls render inside one unified colored card instead of floating below a legacy embed. Queue Manager, Playback Tools, History and Favorites use the same V2 surface. No new service, timer or dependency was added; low-RAM and raw-audio behavior are unchanged."
+          fi
+
+      - name: Remove merged feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push origin --delete feature/jukebox-components-v2 || true
