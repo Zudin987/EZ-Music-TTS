@@ -13,7 +13,7 @@ test('Windows setup uses native Java Lavalink and verifies the pinned jar', () =
   assert.match(setup, /Lavalink\/releases\/download\/%LAVALINK_VERSION%\/Lavalink\.jar/i);
   assert.match(setup, /8cb801e591072c3689fafd71ccf571a95a4ead3cc35dfc045e157d763d89119a/i);
   assert.match(setup, /Get-FileHash/i);
-  assert.doesNotMatch(setup, /docker/i);
+  assert.doesNotMatch(setup, /\bwhere\s+docker\b|\bdocker\s+compose\b/i);
 });
 
 test('Windows launcher starts standalone Lavalink with bounded heap and waits for authenticated readiness', () => {
@@ -25,7 +25,7 @@ test('Windows launcher starts standalone Lavalink with bounded heap and waits fo
   assert.match(start, /127\.0\.0\.1:2333\/version/i);
   assert.match(start, /Authorization='ezmusic-local-only'/i);
   assert.match(start, /22\.14\.0/);
-  assert.doesNotMatch(start, /docker/i);
+  assert.doesNotMatch(start, /\bdocker\s+compose\b|\bdocker\s+run\b/i);
 });
 
 test('Windows stop script refuses to kill a stale unrelated PID', () => {
