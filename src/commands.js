@@ -1,7 +1,9 @@
-import { REST, Routes, SlashCommandBuilder, escapeMarkdown } from 'discord.js';
+import { MessageFlags, REST, Routes, SlashCommandBuilder, escapeMarkdown } from 'discord.js';
 import { recentHistory } from './storage.js';
-import { queueText } from './ui.js';
+import { nowPlayingEmbed, playerButtons, queueText } from './ui.js';
 import { trackKey, truncate } from './utils.js';
+
+const PRIVATE_FLAGS = MessageFlags.Ephemeral;
 
 export const commandDefinitions = [
   new SlashCommandBuilder().setName('play').setDescription('Play or queue a song/playlist').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)),
@@ -13,7 +15,7 @@ export const commandDefinitions = [
   new SlashCommandBuilder().setName('stop').setDescription('Stop playback and clear the queue'),
   new SlashCommandBuilder().setName('disconnect').setDescription('Leave the voice channel'),
   new SlashCommandBuilder().setName('volume').setDescription('Set normal playback volume').addIntegerOption(o => o.setName('percent').setDescription('0-100').setMinValue(0).setMaxValue(100).setRequired(true)),
-  new SlashCommandBuilder().setName('nowplaying').setDescription('Show/recreate the player panel'),
+  new SlashCommandBuilder().setName('nowplaying').setDescription('Show your private player panel'),
   new SlashCommandBuilder().setName('clear').setDescription('Clear all upcoming songs'),
   new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle upcoming songs'),
   new SlashCommandBuilder().setName('loop').setDescription('Set loop mode').addStringOption(o => o.setName('mode').setDescription('Loop mode').setRequired(true).addChoices({name:'Off',value:'none'},{name:'Track',value:'track'},{name:'Queue',value:'queue'})),
@@ -31,6 +33,26 @@ export async function registerGuildCommands(config) {
   const rest = new REST({ version: '10' }).setToken(config.discordToken);
   await rest.put(Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId), { body: commandDefinitions });
   console.log(`[discord] registered ${commandDefinitions.length} guild commands`);
+}
+
+function privateReply(interaction, content, extra = {}) {
+  const payload = { flags: PRIVATE_FLAGS, ...extra };
+  if (content !== undefined && content !== null) payload.content = content;
+  return interaction.reply(payload);
+}
+
+function privateDefer(interaction) {
+  return interaction.deferReply({ flags: PRIVATE_FLAGS });
+}
+
+function playerPanelPayload(player, autoplayMode) {
+  const track = player?.queue?.current;
+  if (!track) return { content: 'Nothing is playing.', embeds: [], components: [] };
+  return {
+    content: null,
+    embeds: [nowPlayingEmbed(track, player, autoplayMode)],
+    components: playerButtons(player, autoplayMode),
+  };
 }
 
 function getPlayer(music, guildId) {
@@ -113,20 +135,21 @@ function helpText() {
     '`/ai request:<text>` `/ai autoplay:on|off`',
     '`/help` `/ping` `/status`',
     '',
-    'The player panel also has Previous, Loop, Pause/Resume, Shuffle, Skip, Queue, Clear, Stop, Autoplay and Volume controls.',
+    'All command replies and the `/nowplaying` control panel are private to the person who invoked them, so the music text channel stays empty.',
+    'The private player panel has Previous, Loop, Pause/Resume, Shuffle, Skip, Queue, Clear, Stop, Autoplay and Volume controls.',
     'Playback is raw: no filters, EQ, nightcore, karaoke, 8D, pitch/speed or other DSP effects.',
   ].join('\n');
 }
 
-export function createInteractionHandler({ client, music, ensurePlayer, gemini, showPanel, refreshPanel, startServerRadio, setGuildAutoplay, getGuildAutoplay }) {
+export function createInteractionHandler({ client, music, ensurePlayer, gemini, startServerRadio, setGuildAutoplay, getGuildAutoplay }) {
   return async function handle(interaction) {
     try {
-      if (interaction.isButton()) return await handleButton(interaction, { music, gemini, refreshPanel, setGuildAutoplay, getGuildAutoplay });
+      if (interaction.isButton()) return await handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay });
       if (!interaction.isChatInputCommand()) return;
 
       const name = interaction.commandName;
-      if (name === 'help') return interaction.reply({ ephemeral: true, content: helpText() });
-      if (name === 'ping') return interaction.reply({ ephemeral: true, content: `🏓 Discord gateway: **${Math.max(0, Math.round(client.ws.ping))} ms**` });
+      if (name === 'help') return privateReply(interaction, helpText());
+      if (name === 'ping') return privateReply(interaction, `🏓 Discord gateway: **${Math.max(0, Math.round(client.ws.ping))} ms**`);
       if (name === 'status') {
         const player = music.players.get(interaction.guildId);
         const mode = getGuildAutoplay(interaction.guildId);
@@ -140,14 +163,13 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
           `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
         ];
         if (player) lines.push(`Queue: **${player.queue.length}** | Volume: **${Math.round(player.volume)}%** | Loop: **${player.loop || 'none'}**`);
-        return interaction.reply({ ephemeral: true, content: lines.join('\n') });
+        return privateReply(interaction, lines.join('\n'));
       }
 
       if (name === 'play' || name === 'playnext') {
-        await interaction.deferReply();
+        await privateDefer(interaction);
         const player = await ensurePlayer(interaction);
         const { tracks, result } = await searchAndQueue(player, interaction.options.getString('query', true), interaction.user, name === 'playnext');
-        await refreshPanel(player).catch(() => {});
         const where = name === 'playnext' ? 'Queued next' : 'Queued';
         return interaction.editReply(result.type === 'PLAYLIST' ? `${where} **${tracks.length} tracks**.` : `${where} **${safeTitle(tracks[0])}**.`);
       }
@@ -161,9 +183,9 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
           requireVoiceForSetting(interaction, music);
           const mode = autoplay === 'on' ? 'ai' : 'off';
           setGuildAutoplay(interaction.guildId, mode);
-          return interaction.reply(`🤖 AI autoplay: **${autoplay.toUpperCase()}**.`);
+          return privateReply(interaction, `🤖 AI autoplay: **${autoplay.toUpperCase()}**.`);
         }
-        await interaction.deferReply();
+        await privateDefer(interaction);
         const recent = recentHistory(interaction.guildId, 20);
         const plan = await gemini.makeQueue(request, { recent, maxSongs: 10 });
         const player = await ensurePlayer(interaction);
@@ -180,7 +202,6 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         if (!added.length) throw new Error('Gemini suggested songs, but none could be resolved by the music source.');
         player.queue.add([...added]);
         if (!player.playing && !player.paused) await player.play();
-        await refreshPanel(player).catch(() => {});
         return interaction.editReply(`🤖 **${truncate(escapeMarkdown(plan.summary), 600)}**\nQueued ${added.length} song${added.length === 1 ? '' : 's'}.`);
       }
 
@@ -188,15 +209,14 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         requireVoiceForSetting(interaction, music);
         const enabled = interaction.options.getString('mode', true) === 'on';
         setGuildAutoplay(interaction.guildId, enabled ? 'standard' : 'off');
-        return interaction.reply(`Autoplay: **${enabled ? 'ON' : 'OFF'}**.`);
+        return privateReply(interaction, `Autoplay: **${enabled ? 'ON' : 'OFF'}**.`);
       }
 
       if (name === 'radio') {
         if (!recentHistory(interaction.guildId, 1).length) throw new Error('Server radio needs some listening history first. Play a few songs, then try again.');
-        await interaction.deferReply();
+        await privateDefer(interaction);
         const player = await ensurePlayer(interaction);
         const count = await startServerRadio(player, interaction.user);
-        await refreshPanel(player).catch(() => {});
         return interaction.editReply(`📻 Server radio queued **${count} tracks** based on this server's listening history.`);
       }
 
@@ -204,83 +224,78 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
       if (name === 'nowplaying') {
         requireSameVoice(interaction, player);
         requireCurrentTrack(player);
-        await interaction.deferReply({ ephemeral: true });
-        player.setTextChannel(interaction.channelId);
-        const message = await showPanel(player);
-        if (!message) throw new Error('Could not create the player panel in this channel.');
-        return interaction.editReply('Player panel recreated.');
+        return privateReply(interaction, null, playerPanelPayload(player, getGuildAutoplay(interaction.guildId)));
       }
       requireSameVoice(interaction, player);
 
-      if (name === 'pause') { requireCurrentTrack(player); player.pause(true); await refreshPanel(player); return interaction.reply('Paused.'); }
-      if (name === 'resume') { requireCurrentTrack(player); player.pause(false); await refreshPanel(player); return interaction.reply('Resumed.'); }
-      if (name === 'skip') { skipCurrent(player); return interaction.reply('Skipped.'); }
+      if (name === 'pause') { requireCurrentTrack(player); player.pause(true); return privateReply(interaction, 'Paused.'); }
+      if (name === 'resume') { requireCurrentTrack(player); player.pause(false); return privateReply(interaction, 'Resumed.'); }
+      if (name === 'skip') { skipCurrent(player); return privateReply(interaction, 'Skipped.'); }
       if (name === 'previous') {
         const prev = player.getPrevious(false);
         if (!prev) throw new Error('No previous song is available.');
         await player.play(prev);
         player.getPrevious(true);
-        return interaction.reply(`Playing previous: **${safeTitle(prev)}**.`);
+        return privateReply(interaction, `Playing previous: **${safeTitle(prev)}**.`);
       }
       if (name === 'stop') {
         player.queue.clear();
         player.setLoop('none');
         setGuildAutoplay(interaction.guildId, 'off');
         if (player.queue.current) player.skip();
-        return interaction.reply('Stopped and cleared the queue.');
+        return privateReply(interaction, 'Stopped and cleared the queue.');
       }
       if (name === 'disconnect') {
-        await interaction.deferReply();
+        await privateDefer(interaction);
         await player.destroy();
         return interaction.editReply('Disconnected.');
       }
       if (name === 'volume') {
         const n = interaction.options.getInteger('percent', true);
         await player.setVolume(n);
-        await refreshPanel(player);
-        return interaction.reply(`Volume: **${n}%**.`);
+        return privateReply(interaction, `Volume: **${n}%**.`);
       }
-      if (name === 'clear') { player.queue.clear(); await refreshPanel(player); return interaction.reply('Upcoming queue cleared.'); }
-      if (name === 'shuffle') { player.queue.shuffle(); await refreshPanel(player); return interaction.reply('Queue shuffled.'); }
+      if (name === 'clear') { player.queue.clear(); return privateReply(interaction, 'Upcoming queue cleared.'); }
+      if (name === 'shuffle') { player.queue.shuffle(); return privateReply(interaction, 'Queue shuffled.'); }
       if (name === 'loop') {
         const mode = interaction.options.getString('mode', true);
         player.setLoop(mode);
-        await refreshPanel(player);
-        return interaction.reply(`Loop: **${mode === 'none' ? 'off' : mode}**.`);
+        return privateReply(interaction, `Loop: **${mode === 'none' ? 'off' : mode}**.`);
       }
     } catch (error) {
       console.error('[interaction]', error);
       const message = `⚠️ ${truncate(error?.message || 'Something went wrong.', 1800)}`;
       if (interaction.isButton()) {
-        if (interaction.deferred || interaction.replied) return interaction.followUp({ ephemeral: true, content: message }).catch(() => {});
-        return interaction.reply({ ephemeral: true, content: message }).catch(() => {});
+        if (interaction.deferred || interaction.replied) return interaction.followUp({ flags: PRIVATE_FLAGS, content: message }).catch(() => {});
+        return interaction.reply({ flags: PRIVATE_FLAGS, content: message }).catch(() => {});
       }
       if (interaction.deferred || interaction.replied) return interaction.editReply({ content: message, embeds: [], components: [] }).catch(() => {});
-      return interaction.reply({ ephemeral: true, content: message }).catch(() => {});
+      return interaction.reply({ flags: PRIVATE_FLAGS, content: message }).catch(() => {});
     }
   };
 }
 
-async function handleButton(interaction, { music, gemini, refreshPanel, setGuildAutoplay, getGuildAutoplay }) {
+async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay }) {
   const player = getPlayer(music, interaction.guildId);
   const action = interaction.customId.split(':')[1];
 
-  if (action === 'queue') return interaction.reply({ ephemeral: true, content: queueText(player) });
+  if (action === 'queue') return privateReply(interaction, queueText(player));
   requireSameVoice(interaction, player);
 
   if (action === 'previous' && !player.getPrevious(false)) throw new Error('No previous song is available.');
 
   await interaction.deferUpdate();
+  let settle = false;
 
   if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }
   else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }
-  else if (action === 'skip') { skipCurrent(player); return; }
+  else if (action === 'skip') { skipCurrent(player); settle = true; }
   else if (action === 'previous') {
     const previous = player.getPrevious(false);
     if (!previous) throw new Error('No previous song is available.');
     await player.play(previous);
     player.getPrevious(true);
-    return;
+    settle = true;
   }
   else if (action === 'shuffle') player.queue.shuffle();
   else if (action === 'clear') player.queue.clear();
@@ -289,8 +304,7 @@ async function handleButton(interaction, { music, gemini, refreshPanel, setGuild
     player.setLoop('none');
     setGuildAutoplay(interaction.guildId, 'off');
     if (player.queue.current) player.skip();
-    else await refreshPanel(player).catch(() => {});
-    return;
+    return interaction.editReply({ content: 'Stopped and cleared the queue.', embeds: [], components: [] });
   } else if (action === 'loop') {
     const next = player.loop === 'none' ? 'track' : player.loop === 'track' ? 'queue' : 'none';
     player.setLoop(next);
@@ -303,8 +317,9 @@ async function handleButton(interaction, { music, gemini, refreshPanel, setGuild
   } else if (action === 'volume_up') {
     await player.setVolume(Math.min(100, player.volume + 10));
   } else {
-    throw new Error('Unknown player control. Recreate the panel with `/nowplaying`.');
+    throw new Error('Unknown player control. Run `/nowplaying` again.');
   }
 
-  await refreshPanel(player).catch(() => {});
+  if (settle) await new Promise((resolve) => setTimeout(resolve, 350));
+  return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId)));
 }
