@@ -30,8 +30,12 @@ test('launcher and stop script track the Discord process safely', () => {
   assert.match(start, /BOT_PID_FILE/i);
   assert.match(start, /Not starting a duplicate Discord session/i);
   assert.match(start, /Get-CimInstance Win32_Process/i);
+  assert.match(start, /\$isEzBot=/);
+  assert.doesNotMatch(start, /\$matches=/i);
   assert.match(stop, /STOP_REQUEST/i);
   assert.match(stop, /src\\index\.js/i);
+  assert.match(stop, /\$isEzBot=/);
+  assert.doesNotMatch(stop, /\$matches=/i);
   assert.match(stop, /Stop-Process/i);
 });
 
