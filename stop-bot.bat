@@ -24,7 +24,7 @@ exit /b 0
 if not exist "data" mkdir "data" >nul 2>nul
 > "%STOP_REQUEST%" echo intentional-stop
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$expected=Join-Path $env:EZ_MUSIC_ROOT 'src\index.js'; $pidFile=$env:BOT_PID_FILE; $isEzBot={param($p) $p -and ([string]$p.Name).Equals('node.exe',[StringComparison]::OrdinalIgnoreCase) -and ([string]$p.CommandLine).IndexOf($expected,[StringComparison]::OrdinalIgnoreCase) -ge 0}; $p=$null; if(Test-Path -LiteralPath $pidFile){$raw=(Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim(); if($raw -match '^\d+$'){$candidate=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$raw) -ErrorAction SilentlyContinue; if(& $isEzBot $candidate){$p=$candidate}}}; if(-not $p){$p=Get-CimInstance Win32_Process -Filter 'Name=''node.exe''' -ErrorAction SilentlyContinue | Where-Object {& $isEzBot $_} | Select-Object -First 1}; if(-not $p){exit 2}; Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$expected=Join-Path $env:EZ_MUSIC_ROOT 'src\index.js'; $pidFile=$env:BOT_PID_FILE; $isEzBot={param($p) $p -and ([string]$p.Name).Equals('node.exe',[StringComparison]::OrdinalIgnoreCase) -and ([string]$p.CommandLine).IndexOf($expected,[StringComparison]::OrdinalIgnoreCase) -ge 0}; $p=$null; if(Test-Path -LiteralPath $pidFile){$raw=(Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim(); if($raw -match '^\d+$'){$candidate=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$raw) -ErrorAction SilentlyContinue; if(& $isEzBot $candidate){$p=$candidate}}}; if(-not $p){$p=Get-CimInstance Win32_Process -Filter 'Name=''node.exe''' -ErrorAction SilentlyContinue | Where-Object {& $isEzBot $_} | Select-Object -First 1}; if(-not $p){exit 2}; $pidValue=$p.ProcessId; for($i=0;$i -lt 20;$i++){Start-Sleep -Milliseconds 250; if(-not (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)){exit 0}}; $still=Get-CimInstance Win32_Process -Filter ('ProcessId='+$pidValue) -ErrorAction SilentlyContinue; if(& $isEzBot $still){Write-Host '[WARN] Graceful stop timed out; forcing the EZ Music Node process.'; Stop-Process -Id $pidValue -Force -ErrorAction Stop; exit 4}; exit 0"
 set "BOT_STOP_RC=%ERRORLEVEL%"
 
 if "%BOT_STOP_RC%"=="0" echo EZ Music Discord bot stopped.
@@ -32,7 +32,8 @@ if "%BOT_STOP_RC%"=="2" (
   echo EZ Music Discord bot was already stopped.
   del /q "%STOP_REQUEST%" >nul 2>nul
 )
-if not "%BOT_STOP_RC%"=="0" if not "%BOT_STOP_RC%"=="2" echo [WARN] Could not stop the Discord bot cleanly.
+if "%BOT_STOP_RC%"=="4" echo EZ Music Discord bot was force-stopped after the graceful timeout.
+if not "%BOT_STOP_RC%"=="0" if not "%BOT_STOP_RC%"=="2" if not "%BOT_STOP_RC%"=="4" echo [WARN] Could not stop the Discord bot cleanly.
 del /q "%BOT_PID_FILE%" >nul 2>nul
 exit /b 0
 
