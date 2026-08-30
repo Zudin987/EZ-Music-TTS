@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           git config user.name "MrEz"
           git config user.email "39240221+Zudin987@users.noreply.github.com"
-          git add package.json .env.example README.md setup.bat start-bot.bat lavalink/application.yml src/config.js src/music.js src/commands.js test/source-routing.test.js .github/workflows/ci.yml
+          git add package.json .env.example README.md setup.bat start-bot.bat lavalink/application.yml src/config.js src/music.js src/commands.js test/source-routing.test.js
           git rm -f .github/apply-source-routing.py .github/workflows/apply-source-routing.yml
           git commit -m "feat: prefer YouTube Music and mirror Spotify URLs"
           git push origin HEAD:feature/ytm-spotify-routing
