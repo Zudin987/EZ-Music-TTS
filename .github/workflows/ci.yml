@@ -4,8 +4,12 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -14,3 +18,30 @@ jobs:
       - run: npm install
       - run: npm run check
       - run: npm test
+
+  lavalink-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Lavalink
+        run: docker compose up -d
+      - name: Wait for Lavalink API
+        shell: bash
+        run: |
+          for attempt in {1..90}; do
+            if curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/version; then
+              echo
+              echo 'Lavalink is ready.'
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Lavalink did not become ready in time.' >&2
+          docker compose logs --no-color lavalink >&2 || true
+          exit 1
+      - name: Show Lavalink logs on failure
+        if: failure()
+        run: docker compose logs --no-color lavalink
+      - name: Stop Lavalink
+        if: always()
+        run: docker compose down -v
