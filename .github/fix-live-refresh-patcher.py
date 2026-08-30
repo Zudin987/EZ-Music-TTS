@@ -22,9 +22,15 @@ if end < 0:
 text = text[:start] + text[end + 2:]
 
 old_assert = "if 'interaction.editReply(panelPayload(' in commands:\n    raise SystemExit('unconverted direct player edit remains')"
-new_assert = "if 'interaction.editReply(panelPayload(' in commands:\n    leftovers = [line.strip() for line in commands.splitlines() if 'interaction.editReply(panelPayload(' in line]\n    raise SystemExit('unconverted direct player edit remains: ' + ' || '.join(leftovers))"
+new_assert = "helper_edit = 'const result = await interaction.editReply(panelPayload(currentPlayer, interaction.guildId, notice));'\nleftovers = [line.strip() for line in commands.splitlines() if 'interaction.editReply(panelPayload(' in line]\nif leftovers != [helper_edit]:\n    raise SystemExit('unexpected direct player edit(s): ' + ' || '.join(leftovers))"
 if text.count(old_assert) != 1:
     raise SystemExit(f'assert marker count: {text.count(old_assert)}')
 text = text.replace(old_assert, new_assert, 1)
+
+old_test = "  assert.doesNotMatch(source, /interaction\\.editReply\\(panelPayload\\(/);"
+new_test = "  assert.equal((source.match(/interaction\\.editReply\\(panelPayload\\(/g) || []).length, 1);\n  assert.match(source, /const result = await interaction\\.editReply\\(panelPayload\\(currentPlayer, interaction\\.guildId, notice\\)\\);/);"
+if text.count(old_test) != 1:
+    raise SystemExit(f'live test marker count: {text.count(old_test)}')
+text = text.replace(old_test, new_test, 1)
 
 path.write_text(text, encoding='utf-8')
