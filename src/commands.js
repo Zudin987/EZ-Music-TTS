@@ -1,9 +1,10 @@
 import { MessageFlags, REST, Routes, SlashCommandBuilder, escapeMarkdown } from 'discord.js';
 import { recentHistory } from './storage.js';
-import { nowPlayingEmbed, playerButtons, queueText } from './ui.js';
-import { trackKey, truncate } from './utils.js';
+import { nowPlayingEmbed, playerButtons, playbackToolsPayload, queueManagerPayload, seekModal } from './ui.js';
+import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
+const MAX_PLAYLIST_ADD = 250;
 
 export const commandDefinitions = [
   new SlashCommandBuilder().setName('play').setDescription('Play or queue a song/playlist').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)),
@@ -45,11 +46,11 @@ function privateDefer(interaction) {
   return interaction.deferReply({ flags: PRIVATE_FLAGS });
 }
 
-function playerPanelPayload(player, autoplayMode) {
+function playerPanelPayload(player, autoplayMode, notice = null) {
   const track = player?.queue?.current;
-  if (!track) return { content: 'Nothing is playing.', embeds: [], components: [] };
+  if (!track) return { content: notice || 'Nothing is playing.', embeds: [], components: [] };
   return {
-    content: null,
+    content: notice,
     embeds: [nowPlayingEmbed(track, player, autoplayMode)],
     components: playerButtons(player, autoplayMode),
   };
@@ -89,8 +90,8 @@ function assertQueueRequestActive(music, player, guildId, revision, isQueueRevis
   }
 }
 
-function clearUpcomingQueue(player, guildId, { setGuildAutoplay, invalidateQueueWork }) {
-  const removed = Number(player.queue.length || 0);
+function clearUpcomingQueue(player, guildId, { setGuildAutoplay, invalidateQueueWork, discardHeldQueue }) {
+  const removed = Number(player.queue.length || 0) + discardHeldQueue(guildId);
   invalidateQueueWork(guildId);
   player.setLoop('none');
   setGuildAutoplay(guildId, 'off');
@@ -98,8 +99,8 @@ function clearUpcomingQueue(player, guildId, { setGuildAutoplay, invalidateQueue
   return removed;
 }
 
-async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidateQueueWork }) {
-  const removed = Number(player.queue.length || 0);
+async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidateQueueWork, discardHeldQueue }) {
+  const removed = Number(player.queue.length || 0) + discardHeldQueue(guildId);
   invalidateQueueWork(guildId);
   player.setLoop('none');
   setGuildAutoplay(guildId, 'off');
@@ -107,16 +108,10 @@ async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidat
   if (Array.isArray(player.queue.previous)) player.queue.previous.splice(0, player.queue.previous.length);
 
   if (player.queue.current) {
-    // A paused Lavalink player remains paused across track changes unless it is
-    // explicitly unpaused. Reset both layers before stopping so the next /play
-    // cannot get stuck as "queued" with no audio.
     if (player.paused || player.shoukaku?.paused) {
       try { await player.shoukaku.setPaused(false); } catch { /* stop below still wins */ }
       player.paused = false;
     }
-    // Null the logical current track before stopTrack. Kazagumo normally moves
-    // a stopped current track into queue.previous from its end event; doing this
-    // makes /stop a true reset instead of allowing /previous to resurrect it.
     player.queue.current = null;
     player.skip();
   } else {
@@ -129,8 +124,6 @@ async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidat
 
 function skipCurrent(player) {
   requireCurrentTrack(player);
-  // Kazagumo requeues the current track when track-loop is active, so /skip
-  // must disable that mode first or the same song immediately starts again.
   if (player.loop === 'track') player.setLoop('none');
   player.skip();
 }
@@ -141,13 +134,14 @@ async function searchTracks(player, query, requester) {
   return { result, tracks: result.type === 'PLAYLIST' ? [...result.tracks] : [result.tracks[0]] };
 }
 
-async function searchAndQueue(player, query, requester, next = false, guard = () => {}) {
+async function searchAndQueue(player, query, requester, next, guard, queueTracks, queueLimit) {
   const { tracks, result } = await searchTracks(player, query, requester);
   guard();
-  if (next) player.queue.unshift(...tracks);
-  else player.queue.add([...tracks]);
+  const perRequestLimit = result.type === 'PLAYLIST' ? MAX_PLAYLIST_ADD : 1;
+  const queued = queueTracks(player, tracks, { next, perRequestLimit });
+  if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
   if (!player.playing && !player.paused) await player.play();
-  return { tracks, result };
+  return { tracks: queued.added, result, omitted: queued.omitted, sourceCount: tracks.length };
 }
 
 async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3, guard = () => {}) {
@@ -179,6 +173,48 @@ function safeTitle(track, max = 100) {
   return truncate(escapeMarkdown(track?.title || 'Unknown title'), max);
 }
 
+function queueFingerprint(track) {
+  const input = `${track?.identifier || ''}\u0000${track?.uri || ''}\u0000${track?.author || ''}\u0000${track?.title || ''}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function mb(bytes) {
+  const n = Number(bytes || 0);
+  return n > 0 ? `${(n / 1024 / 1024).toFixed(n >= 100 * 1024 * 1024 ? 0 : 1)} MB` : 'n/a';
+}
+
+function sourceHealthLine(health) {
+  if (!health || health.status === 'healthy') return 'Playback source: **Healthy**';
+  const held = Number(health.held || 0);
+  const retrySeconds = health.retryAt > Date.now() ? Math.ceil((health.retryAt - Date.now()) / 1000) : 0;
+  const label = health.status === 'recovering' ? 'Recovering' : 'Degraded';
+  return `Playback source: **⚠️ ${label}**${held ? ` • ${held} track${held === 1 ? '' : 's'} preserved` : ''}${retrySeconds ? ` • retry in ~${retrySeconds}s` : ''}`;
+}
+
+function dedupeUpcoming(player) {
+  const seen = new Set();
+  const currentKey = trackKey(player?.queue?.current);
+  if (currentKey) seen.add(currentKey);
+  let removed = 0;
+  let index = 0;
+  while (index < player.queue.length) {
+    const key = trackKey(player.queue[index]);
+    if (key && seen.has(key)) {
+      player.queue.splice(index, 1);
+      removed += 1;
+      continue;
+    }
+    if (key) seen.add(key);
+    index += 1;
+  }
+  return removed;
+}
+
 function helpText() {
   return [
     '**EZ Music commands**',
@@ -188,10 +224,11 @@ function helpText() {
     '`/ai request:<text>` `/ai autoplay:on|off`',
     '`/help` `/ping` `/status`',
     '',
-    'All command replies and the `/nowplaying` control panel are private to the person who invoked them, so the music text channel stays empty.',
-    '`/clear` keeps the current song playing, removes everything upcoming, and turns loop/autoplay off so the queue stays clear.',
-    '`/stop` stops the current song and fully resets the active queue/previous list.',
-    'Volume is saved for the server and remains in effect across disconnects and bot restarts until changed again.',
+    'All replies and player/queue controls are private, so the music text channel stays empty.',
+    'Queue Manager: Queue → select a track → Remove / Move Next / Play Now. It also supports pages and duplicate cleanup.',
+    'More: private seek/replay controls without adding extra slash commands.',
+    '`/clear` keeps the current song playing, clears everything upcoming, and turns loop/autoplay off.',
+    '`/stop` fully resets current/upcoming/previous state. Volume stays saved until changed again.',
     'Playback is raw: no filters, EQ, nightcore, karaoke, 8D, pitch/speed or other DSP effects.',
   ].join('\n');
 }
@@ -209,21 +246,21 @@ export function createInteractionHandler({
   getQueueRevision,
   invalidateQueueWork,
   isQueueRevisionCurrent,
+  queueTracks,
+  getQueueLimit,
+  getRuntimeStats,
+  getSourceHealth,
+  discardHeldQueue,
 }) {
-  const queueControls = { setGuildAutoplay, invalidateQueueWork };
+  const queueLimit = getQueueLimit();
+  const queueControls = { setGuildAutoplay, invalidateQueueWork, discardHeldQueue };
+  const componentApi = { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume, invalidateQueueWork, discardHeldQueue };
 
   return async function handle(interaction) {
     try {
-      if (interaction.isButton()) {
-        return await handleButton(interaction, {
-          music,
-          gemini,
-          setGuildAutoplay,
-          getGuildAutoplay,
-          setGuildVolume,
-          invalidateQueueWork,
-        });
-      }
+      if (interaction.isStringSelectMenu()) return await handleQueueSelect(interaction, { music });
+      if (interaction.isModalSubmit()) return await handleModalSubmit(interaction, { music, getGuildAutoplay });
+      if (interaction.isButton()) return await handleButton(interaction, componentApi);
       if (!interaction.isChatInputCommand()) return;
 
       const name = interaction.commandName;
@@ -235,22 +272,35 @@ export function createInteractionHandler({
         const player = music.players.get(interaction.guildId);
         const mode = getGuildAutoplay(interaction.guildId);
         const volume = getGuildVolume(interaction.guildId);
+        const health = getSourceHealth(interaction.guildId);
+        const runtime = await getRuntimeStats();
         let lavalink = 'Unavailable';
         try { await music.getLeastUsedNode(); lavalink = 'Connected'; } catch { /* no online node */ }
+
         const lines = [
           `Discord gateway: **Online** (${Math.max(0, Math.round(client.ws.ping))} ms)`,
           `Lavalink: **${lavalink}**`,
+          sourceHealthLine(health),
           `Gemini: **${gemini.enabled ? `Configured (${gemini.model})` : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Saved volume: **${volume}%**`,
           `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
         ];
+
         if (player) {
           const voicePing = Number(player.shoukaku?.ping ?? 0);
           lines.push(`Voice transport: **${voicePing > 0 ? `${Math.round(voicePing)} ms` : 'connected / measuring'}**`);
           if (player.queue.current) lines.push(`Current: **${safeTitle(player.queue.current, 100)}**`);
-          lines.push(`Up next: **${player.queue.length}** | Loop: **${player.loop || 'none'}**`);
+          lines.push(`Up next: **${player.queue.length}/${queueLimit}** | Loop: **${player.loop || 'none'}**`);
+        } else {
+          lines.push(`Queue safety limit: **${queueLimit} upcoming tracks**`);
         }
+
+        const nodeMemory = runtime?.node;
+        if (nodeMemory) lines.push(`Node RAM: **${mb(nodeMemory.rss)} RSS** • heap ${mb(nodeMemory.heapUsed)}/${mb(nodeMemory.heapTotal)}`);
+        const llMemory = runtime?.lavalink?.memory;
+        if (llMemory) lines.push(`Lavalink JVM: **${mb(llMemory.used)} used** • max ${mb(llMemory.reservable)}`);
+        lines.push('RAM note: JVM figures are Lavalink runtime memory, not the Java process\'s complete Windows working set.');
         return privateReply(interaction, lines.join('\n'));
       }
 
@@ -270,9 +320,13 @@ export function createInteractionHandler({
         const player = await ensurePlayer(interaction);
         const revision = getQueueRevision(interaction.guildId);
         const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);
-        const { tracks, result } = await searchAndQueue(player, interaction.options.getString('query', true), interaction.user, name === 'playnext', guard);
+        const queued = await searchAndQueue(player, interaction.options.getString('query', true), interaction.user, name === 'playnext', guard, queueTracks, queueLimit);
         const where = name === 'playnext' ? 'Queued next' : 'Queued';
-        return interaction.editReply(result.type === 'PLAYLIST' ? `${where} **${tracks.length} tracks**.` : `${where} **${safeTitle(tracks[0])}**.`);
+        if (queued.result.type === 'PLAYLIST') {
+          const limitNote = queued.omitted ? ` Limited for stability: **${queued.omitted} track${queued.omitted === 1 ? '' : 's'} not added** (max ${MAX_PLAYLIST_ADD} per playlist / ${queueLimit} upcoming).` : '';
+          return interaction.editReply(`${where} **${queued.tracks.length} tracks**.${limitNote}`);
+        }
+        return interaction.editReply(`${where} **${safeTitle(queued.tracks[0])}**.`);
       }
 
       if (name === 'ai') {
@@ -305,12 +359,13 @@ export function createInteractionHandler({
           if (key) seen.add(key);
         }
 
-        const added = await resolveSearchQueries(player, plan.queries, interaction.user, seen, 10, 3, guard);
+        const resolved = await resolveSearchQueries(player, plan.queries, interaction.user, seen, 10, 3, guard);
         guard();
-        if (!added.length) throw new Error('Gemini suggested songs, but none could be resolved by the music source.');
-        player.queue.add([...added]);
+        if (!resolved.length) throw new Error('Gemini suggested songs, but none could be resolved by the music source.');
+        const queued = queueTracks(player, resolved);
+        if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
         if (!player.playing && !player.paused) await player.play();
-        return interaction.editReply(`🤖 **${truncate(escapeMarkdown(plan.summary), 600)}**\nQueued ${added.length} song${added.length === 1 ? '' : 's'}.`);
+        return interaction.editReply(`🤖 **${truncate(escapeMarkdown(plan.summary), 600)}**\nQueued ${queued.added.length} song${queued.added.length === 1 ? '' : 's'}${queued.omitted ? ` (${queued.omitted} omitted because the queue is full)` : ''}.`);
       }
 
       if (name === 'autoplay') {
@@ -343,23 +398,24 @@ export function createInteractionHandler({
       if (name === 'previous') {
         const prev = player.getPrevious(false);
         if (!prev) throw new Error('No previous song is available.');
-        await player.play(prev);
+        await player.play(prev, { replaceCurrent: true });
         player.getPrevious(true);
         return privateReply(interaction, `Playing previous: **${safeTitle(prev)}**.`);
       }
       if (name === 'stop') {
         const removed = await stopAndResetPlayer(player, interaction.guildId, queueControls);
-        return privateReply(interaction, `Stopped. Cleared **${removed} upcoming track${removed === 1 ? '' : 's'}**, previous-track state, loop, and autoplay.`);
+        return privateReply(interaction, `Stopped. Cleared **${removed} upcoming/preserved track${removed === 1 ? '' : 's'}**, previous-track state, loop, and autoplay.`);
       }
       if (name === 'disconnect') {
         await privateDefer(interaction);
         invalidateQueueWork(interaction.guildId);
+        discardHeldQueue(interaction.guildId);
         await player.destroy();
         return interaction.editReply('Disconnected.');
       }
       if (name === 'clear') {
         const removed = clearUpcomingQueue(player, interaction.guildId, queueControls);
-        const prefix = removed ? `Cleared **${removed} upcoming track${removed === 1 ? '' : 's'}**.` : 'The upcoming queue was already empty.';
+        const prefix = removed ? `Cleared **${removed} upcoming/preserved track${removed === 1 ? '' : 's'}**.` : 'The upcoming queue was already empty.';
         return privateReply(interaction, `${prefix} Current song keeps playing; loop and autoplay are **OFF** so the queue stays clear.`);
       }
       if (name === 'shuffle') {
@@ -375,7 +431,7 @@ export function createInteractionHandler({
     } catch (error) {
       if (!error?.expected) console.error('[interaction]', error);
       const message = `⚠️ ${truncate(error?.message || 'Something went wrong.', 1800)}`;
-      if (interaction.isButton()) {
+      if (interaction.isMessageComponent?.() || interaction.isModalSubmit?.()) {
         if (interaction.deferred || interaction.replied) return interaction.followUp({ flags: PRIVATE_FLAGS, content: message }).catch(() => {});
         return interaction.reply({ flags: PRIVATE_FLAGS, content: message }).catch(() => {});
       }
@@ -385,24 +441,114 @@ export function createInteractionHandler({
   };
 }
 
-async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume, invalidateQueueWork }) {
+async function handleQueueSelect(interaction, { music }) {
   const player = getPlayer(music, interaction.guildId);
-  const action = interaction.customId.split(':')[1];
+  const parts = interaction.customId.split(':');
+  const page = Number.parseInt(parts[2], 10) || 0;
+  const selectedIndex = Number.parseInt(interaction.values?.[0], 10);
+  await interaction.deferUpdate();
+  return interaction.editReply(queueManagerPayload(player, page, Number.isInteger(selectedIndex) ? selectedIndex : null));
+}
 
-  if (action === 'queue') return privateReply(interaction, queueText(player));
+async function handleModalSubmit(interaction, { music, getGuildAutoplay }) {
+  if (interaction.customId !== 'music:seeksubmit') return;
+  const player = getPlayer(music, interaction.guildId);
+  requireSameVoice(interaction, player);
+  requireCurrentTrack(player);
+  if (player.queue.current?.isSeekable === false || player.queue.current?.isStream) throw new Error('This track cannot be seeked.');
+  const seconds = parseTimeToSeconds(interaction.fields.getTextInputValue('position'));
+  if (seconds === null) throw new Error('Use seconds, M:SS, or H:MM:SS (example: `1:37`).');
+  const maxMs = Math.max(0, Number(player.queue.current.length || 0));
+  const targetMs = Math.max(0, Math.min(maxMs || Number.MAX_SAFE_INTEGER, Math.round(seconds * 1000)));
+  await interaction.deferUpdate();
+  await player.seek(targetMs);
+  return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId), `🎯 Seeked to **${Math.floor(targetMs / 1000)}s**.`));
+}
+
+async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume, invalidateQueueWork, discardHeldQueue }) {
+  const player = getPlayer(music, interaction.guildId);
+  const parts = interaction.customId.split(':');
+  const action = parts[1];
+  const queueControls = { setGuildAutoplay, invalidateQueueWork, discardHeldQueue };
+
+  // Read-only private navigation does not require joining voice.
+  if (action === 'queue') {
+    await interaction.deferUpdate();
+    return interaction.editReply(queueManagerPayload(player, 0));
+  }
+  if (action === 'qpage' || action === 'qrefresh') {
+    await interaction.deferUpdate();
+    return interaction.editReply(queueManagerPayload(player, Number.parseInt(parts[2], 10) || 0));
+  }
+  if (action === 'qback' || action === 'back') {
+    await interaction.deferUpdate();
+    return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId)));
+  }
   if (action === 'refresh') {
     await interaction.deferUpdate();
     return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId)));
   }
+  if (action === 'more_refresh') {
+    await interaction.deferUpdate();
+    return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId)));
+  }
 
   requireSameVoice(interaction, player);
+
+  if (action === 'seekmodal') return interaction.showModal(seekModal());
+  if (action === 'more') {
+    requireCurrentTrack(player);
+    await interaction.deferUpdate();
+    return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId)));
+  }
+
+  if (action === 'qdedupe') {
+    const page = Number.parseInt(parts[2], 10) || 0;
+    const removed = dedupeUpcoming(player);
+    await interaction.deferUpdate();
+    return interaction.editReply(queueManagerPayload(player, page, null, removed ? `🧽 Removed ${removed} duplicate track${removed === 1 ? '' : 's'}.` : '🧽 No duplicates found.'));
+  }
+
+  if (['qremove', 'qnext', 'qplay'].includes(action)) {
+    const index = Number.parseInt(parts[2], 10);
+    const page = Number.parseInt(parts[3], 10) || 0;
+    const expectedFingerprint = parts[4] || '';
+    const selected = Number.isInteger(index) && index >= 0 ? player.queue[index] : null;
+    if (!selected || queueFingerprint(selected) !== expectedFingerprint) throw expectedError('That queue item changed or no longer exists. Refresh the Queue Manager.');
+
+    if (action === 'qremove') {
+      player.queue.splice(index, 1);
+      await interaction.deferUpdate();
+      return interaction.editReply(queueManagerPayload(player, page, null, `🗑️ Removed **${safeTitle(selected, 80)}**.`));
+    }
+    if (action === 'qnext') {
+      const [track] = player.queue.splice(index, 1);
+      player.queue.unshift(track);
+      await interaction.deferUpdate();
+      return interaction.editReply(queueManagerPayload(player, 0, 0, `⬆️ Moved **${safeTitle(track, 80)}** to next.`));
+    }
+    const [track] = player.queue.splice(index, 1);
+    await interaction.deferUpdate();
+    await player.play(track);
+    return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId), `▶️ Playing **${safeTitle(track, 80)}** now. The interrupted song was moved to the front of the queue.`));
+  }
+
+  if (action === 'seekdelta' || action === 'replay') {
+    requireCurrentTrack(player);
+    if (player.queue.current?.isSeekable === false || player.queue.current?.isStream) throw new Error('This track cannot be seeked.');
+    const delta = action === 'replay' ? -Number(player.position || 0) : Number.parseInt(parts[2], 10) || 0;
+    const max = Math.max(0, Number(player.queue.current.length || 0));
+    const target = Math.max(0, Math.min(max || Number.MAX_SAFE_INTEGER, Number(player.position || 0) + delta));
+    await interaction.deferUpdate();
+    await player.seek(target);
+    return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId), action === 'replay' ? '🔁 Replaying from the beginning.' : `🎯 Seeked to ${Math.floor(target / 1000)}s.`));
+  }
 
   if (action === 'previous' && !player.getPrevious(false)) throw new Error('No previous song is available.');
 
   await interaction.deferUpdate();
   let settle = false;
   let notice = null;
-  const queueControls = { setGuildAutoplay, invalidateQueueWork };
 
   if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }
   else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }
@@ -410,7 +556,7 @@ async function handleButton(interaction, { music, gemini, setGuildAutoplay, getG
   else if (action === 'previous') {
     const previous = player.getPrevious(false);
     if (!previous) throw new Error('No previous song is available.');
-    await player.play(previous);
+    await player.play(previous, { replaceCurrent: true });
     player.getPrevious(true);
     settle = true;
   }
@@ -420,11 +566,11 @@ async function handleButton(interaction, { music, gemini, setGuildAutoplay, getG
   }
   else if (action === 'clear') {
     const removed = clearUpcomingQueue(player, interaction.guildId, queueControls);
-    notice = removed ? `🧹 Cleared ${removed} upcoming track${removed === 1 ? '' : 's'}. Loop and autoplay are off.` : '🧹 Queue already empty. Loop and autoplay are off.';
+    notice = removed ? `🧹 Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}. Loop and autoplay are off.` : '🧹 Queue already empty. Loop and autoplay are off.';
   }
   else if (action === 'stop') {
     const removed = await stopAndResetPlayer(player, interaction.guildId, queueControls);
-    return interaction.editReply({ content: `Stopped and reset. Cleared ${removed} upcoming track${removed === 1 ? '' : 's'}.`, embeds: [], components: [] });
+    return interaction.editReply({ content: `Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`, embeds: [], components: [] });
   } else if (action === 'loop') {
     const next = player.loop === 'none' ? 'track' : player.loop === 'track' ? 'queue' : 'none';
     player.setLoop(next);
@@ -445,7 +591,5 @@ async function handleButton(interaction, { music, gemini, setGuildAutoplay, getG
   }
 
   if (settle) await new Promise((resolve) => setTimeout(resolve, 350));
-  const payload = playerPanelPayload(player, getGuildAutoplay(interaction.guildId));
-  if (notice) payload.content = notice;
-  return interaction.editReply(payload);
+  return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId), notice));
 }
