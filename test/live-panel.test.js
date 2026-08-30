@@ -19,13 +19,14 @@ function fakeScheduler() {
   };
 }
 
-function fakeInteraction(id, { guildId = 'guild', userId = 'user', createdTimestamp = 1_000 } = {}) {
+function fakeInteraction(id, { guildId = 'guild', userId = 'user', createdTimestamp = 1_000, ephemeral = true } = {}) {
   const edits = [];
   return {
     id,
     guildId,
     user: { id: userId },
     createdTimestamp,
+    ephemeral,
     edits,
     async editReply(payload) {
       edits.push(payload);
@@ -34,7 +35,7 @@ function fakeInteraction(id, { guildId = 'guild', userId = 'user', createdTimest
   };
 }
 
-test('live registry keeps only the newest panel per guild/user', async () => {
+test('live registry keeps only the newest private panel per guild/user', async () => {
   let now = 1_000;
   const scheduler = fakeScheduler();
   const registry = createLivePanelRegistry({
@@ -55,7 +56,7 @@ test('live registry keeps only the newest panel per guild/user', async () => {
   registry.shutdown();
 });
 
-test('different users can each have one live panel and maxEntries evicts oldest', () => {
+test('different users can each have one private live panel and maxEntries evicts oldest', () => {
   const scheduler = fakeScheduler();
   const registry = createLivePanelRegistry({
     maxEntries: 2,
@@ -74,6 +75,24 @@ test('different users can each have one live panel and maxEntries evicts oldest'
   assert.equal(registry.has(a), false);
   assert.equal(registry.has(b), true);
   assert.equal(registry.has(c), true);
+  registry.shutdown();
+});
+
+test('public live panels share one guild lease regardless of which user refreshes it', async () => {
+  const scheduler = fakeScheduler();
+  const registry = createLivePanelRegistry({
+    render: (interaction) => ({ content: interaction.id }),
+    setIntervalFn: scheduler.setIntervalFn,
+    clearIntervalFn: scheduler.clearIntervalFn,
+  });
+  const a = fakeInteraction('public-a', { userId: 'a', ephemeral: false, createdTimestamp: Date.now() });
+  const b = fakeInteraction('public-b', { userId: 'b', ephemeral: false, createdTimestamp: Date.now() });
+  registry.track(a);
+  registry.track(b);
+  assert.equal(registry.size(), 1);
+  await registry.tick();
+  assert.equal(a.edits.length, 0);
+  assert.deepEqual(b.edits, [{ content: 'public-b' }]);
   registry.shutdown();
 });
 
@@ -134,7 +153,7 @@ test('pause immediately removes the matching live lease', () => {
 test('commands wire /nowplaying and player-return buttons into live refresh', () => {
   const source = readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8');
   assert.match(source, /createLivePanelRegistry/);
-  assert.match(source, /await privateReply\(interaction, null, panelPayload\(player, interaction\.guildId\)\);\s*livePanels\.track\(interaction\)/);
+  assert.match(source, /await publicNowPlayingReply\(interaction, panelPayload\(player, interaction\.guildId\)\);\s*livePanels\.track\(interaction\)/);
   assert.match(source, /livePanels\.pause\(interaction\)/);
   assert.match(source, /return editLivePanel\(interaction, player\)/);
   assert.equal((source.match(/interaction\.editReply\(panelPayload\(/g) || []).length, 1);

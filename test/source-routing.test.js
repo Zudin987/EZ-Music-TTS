@@ -110,7 +110,7 @@ test('configured valid Spotify references are passed directly to LavaSrc once', 
 });
 
 test('Spotify remains optional and LavaSrc mirrors via YTM before YouTube', () => {
-  assert.equal(pkg.version, '0.1.4');
+  assert.equal(pkg.version, '0.1.5');
   assert.match(envExample, /SPOTIFY_CLIENT_ID=/);
   assert.match(envExample, /SPOTIFY_CLIENT_SECRET=/);
   assert.match(config, /spotifyClientId/);

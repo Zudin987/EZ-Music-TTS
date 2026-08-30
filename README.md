@@ -1,13 +1,13 @@
 # EZ Music
 
-Private single-server Discord music bot focused on raw/original playback, a clean text channel, a private JukeBox-style player panel, server radio, autoplay, and an optional Gemini AI DJ.
+Private single-server Discord music bot focused on raw/original playback, a clean text channel, a shared silent Now Playing JukeBox, private detailed controls, server radio, autoplay, and an optional Gemini AI DJ.
 
 ## Design rules
 
 - Raw/original playback first.
 - No nightcore, karaoke, 8D, EQ, pitch, speed, bass boost, distortion, or other DSP effects.
 - Normal volume control is retained and saved persistently per server.
-- All slash-command replies and the player panel are ephemeral/private to the person using them, so the music text channel can stay empty.
+- `/nowplaying` is the only public response and uses Discord's suppress-notifications flag. All other slash-command replies, detailed menus, confirmations, and errors remain ephemeral/private.
 - Gemini is optional and never sits in the audio path; normal music still works if Gemini is unavailable.
 - Lavalink runs natively on Windows. Docker and WSL are not required.
 - Lavalink binds to `127.0.0.1` only and generic HTTP-source playback is disabled.
@@ -26,7 +26,7 @@ There is deliberately no public `/queue` slash command. Queue viewing is a priva
 - Async `/play`, `/ai`, radio, and autoplay work is revision-guarded so an old request cannot silently refill a queue after you clear/stop/disconnect.
 - The panel and `/status` label the count as **Up next** so it is not confused with the currently playing track.
 
-## Private player UI
+## Shared Now Playing + private detailed UI
 
 Run:
 
@@ -34,17 +34,17 @@ Run:
 /nowplaying
 ```
 
-The response is visible only to you. The player uses Discord Components V2: artwork, metadata, status, and every control button live inside one colored JukeBox container instead of buttons floating below a legacy embed.
+The response is public so everyone in the music channel can see the current player, but it is sent with Discord's **Suppress Notifications** flag. The player uses Discord Components V2: artwork, metadata, status, and control buttons live inside one colored JukeBox container instead of buttons floating below a legacy embed. Discord can still mark a channel unread for a new public message; the API does not provide a flag that guarantees a visible public message never affects unread state.
 
 Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · Favorite · More · Refresh
 
-`Queue` opens a private Queue Manager with 25-track pages, a track selector, Remove, Move Next, Play Now, stronger duplicate cleanup, and refresh/back controls. Clear/Remove/Dedupe keep one bounded **5-minute Undo** snapshot so accidental queue changes can be reversed without another service.
+`Queue` opens a private Queue Manager with 25-track pages, a track selector, Remove, Move Next, Play Now, stronger duplicate cleanup, and refresh/back controls. `More` and personal Favorite confirmations also stay private even when opened from the public Now Playing panel. Clear/Remove/Dedupe keep one bounded **5-minute Undo** snapshot so accidental queue changes can be reversed without another service.
 
 `Favorite` saves/removes the currently displayed song from your personal SQLite favorites. The button is fingerprinted to the displayed track, so an old private panel cannot accidentally favorite a different song after the track changes.
 
 `More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers.
 
-While the main `/nowplaying` JukeBox view is open, its progress/current-track/status display refreshes about every **10 seconds**. Only one live player message per user/server is tracked. Opening Queue, More, History, or Favorites pauses that live lease so a background refresh never overwrites the sub-view; returning with Back or pressing Refresh starts a fresh lease. Each lease retires after about **14 minutes**, before Discord's ephemeral interaction token expires, and leaves a notice telling you to press Refresh to resume. The registry is capped at 32 live panels and uses one lazy timer only while at least one live panel exists; it adds no service or audio-processing process.
+While the main `/nowplaying` JukeBox view is open, its progress/current-track/status display refreshes about every **10 seconds**. Public panels use one shared live lease per server, while private sub-views keep per-user leases so opening Queue/More never turns those details public or evicts the shared panel. Each interaction-backed lease retires after about **14 minutes** and leaves a notice telling you to press Refresh to resume. The registry is capped at 32 live panels and uses one lazy timer only while at least one live panel exists; it adds no service or audio-processing process.
 
 For ambiguous text searches, `/play ... select:true` and `/playnext ... select:true` open a private top-5 result picker for 2 minutes. Direct URLs/playlists remain immediate. The picker is bounded in memory and has no background timer.
 
@@ -191,12 +191,12 @@ Lavalink uses a single-server stability buffer profile:
 
 ```yaml
 nonAllocatingFrameBuffer: true
-bufferDurationMs: 1000
-frameBufferDurationMs: 10000
+bufferDurationMs: 2000
+frameBufferDurationMs: 20000
 youtubePlaylistLoadLimit: 3
 ```
 
-These are buffering controls, not audio effects. They do not alter pitch, speed, EQ, or the source recording. The extra headroom is intended to absorb short source/network/GC hiccups, especially near track startup.
+These are buffering controls, not audio effects. They do not alter pitch, speed, EQ, or the source recording. The extra 2-second non-allocating buffer and 20-second frame buffer are intended to absorb short source/network/GC hiccups, especially near track startup, while staying comfortably within the existing 256 MB Lavalink heap cap for this single-server bot.
 
 The low-memory launcher uses:
 
@@ -243,7 +243,8 @@ The built-in Lavalink YouTube source is disabled. Generic arbitrary HTTP-source 
 - current song
 - Up Next count and loop mode
 - Node RSS / heap usage
-- Lavalink JVM memory stats
+- Lavalink JVM memory and CPU stats
+- live audio frame counters (`sent`, `nulled`, `deficit`) plus a smooth/frame-starvation indicator
 - playback-source health / preserved-queue protection state
 - recoverable-session controls when the bot is disconnected
 - private Recent History and Favorites entry points

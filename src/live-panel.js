@@ -2,10 +2,23 @@ export const LIVE_PANEL_REFRESH_MS = 10_000;
 export const LIVE_PANEL_TTL_MS = 14 * 60_000;
 export const LIVE_PANEL_MAX = 32;
 
+const EPHEMERAL_FLAG = 1 << 6;
+
+function interactionIsEphemeral(interaction) {
+  if (interaction?.ephemeral === true) return true;
+  if (interaction?.ephemeral === false) return false;
+  const flags = interaction?.message?.flags;
+  if (typeof flags?.has === 'function') return flags.has(EPHEMERAL_FLAG);
+  return Boolean(Number(flags?.bitfield ?? flags ?? 0) & EPHEMERAL_FLAG);
+}
+
 function panelKey(interaction) {
   const guildId = interaction?.guildId;
   const userId = interaction?.user?.id;
-  return guildId && userId ? `${guildId}:${userId}` : null;
+  if (!guildId || !userId) return null;
+  return interactionIsEphemeral(interaction)
+    ? `${guildId}:private:${userId}`
+    : `${guildId}:public`;
 }
 
 export function createLivePanelRegistry({

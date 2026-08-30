@@ -536,6 +536,12 @@ export function createMusic(client, config, gemini) {
   async function getRuntimeStats() {
     const node = process.memoryUsage();
     let lavalink = null;
+    let liveStats = null;
+    try {
+      const nodes = music.shoukaku?.nodes;
+      const candidates = typeof nodes?.values === 'function' ? [...nodes.values()] : [];
+      liveStats = candidates.find((candidate) => candidate?.stats)?.stats || null;
+    } catch { /* live WebSocket stats are optional diagnostics */ }
     try {
       const response = await fetch(`${lavalinkBaseUrl()}/v4/stats`, {
         headers: { Authorization: config.lavalinkPassword },
@@ -543,6 +549,16 @@ export function createMusic(client, config, gemini) {
       });
       if (response.ok) lavalink = await response.json();
     } catch { /* status remains useful even if stats endpoint is temporarily unavailable */ }
+
+    // Lavalink intentionally omits frameStats from GET /v4/stats. Shoukaku keeps
+    // the latest WebSocket stats payload, so merge those frame/CPU counters into
+    // the REST snapshot without adding another connection or monitoring service.
+    if (liveStats) {
+      lavalink = lavalink
+        ? { ...lavalink, cpu: liveStats.cpu || lavalink.cpu, frameStats: liveStats.frameStats ?? null }
+        : { ...liveStats };
+    }
+
     return {
       node: { rss: node.rss, heapUsed: node.heapUsed, heapTotal: node.heapTotal },
       lavalink,
