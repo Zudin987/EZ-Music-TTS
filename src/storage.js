@@ -28,28 +28,20 @@ CREATE TABLE IF NOT EXISTS history (
   played_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_history_guild_played ON history(guild_id, played_at DESC);
+CREATE TABLE IF NOT EXISTS guild_settings (
+  guild_id TEXT PRIMARY KEY,
+  autoplay_mode TEXT NOT NULL DEFAULT 'off',
+  updated_at INTEGER NOT NULL
+);
 `);
 
-const addFavoriteStmt = db.prepare(`INSERT OR IGNORE INTO favorites
-(guild_id,user_id,uri,title,author,created_at) VALUES (?,?,?,?,?,?)`);
-const removeFavoriteStmt = db.prepare('DELETE FROM favorites WHERE guild_id=? AND user_id=? AND uri=?');
-const listFavoritesStmt = db.prepare('SELECT * FROM favorites WHERE guild_id=? AND user_id=? ORDER BY created_at DESC LIMIT ?');
 const historyStmt = db.prepare(`INSERT INTO history
 (guild_id,user_id,uri,title,author,duration_ms,played_at) VALUES (?,?,?,?,?,?,?)`);
 const recentHistoryStmt = db.prepare('SELECT * FROM history WHERE guild_id=? ORDER BY played_at DESC LIMIT ?');
-
-export function addFavorite(guildId, userId, track) {
-  const info = trackToInfo(track);
-  return addFavoriteStmt.run(guildId, userId, info.uri, info.title, info.author, Date.now()).changes > 0;
-}
-
-export function removeFavorite(guildId, userId, uri) {
-  return removeFavoriteStmt.run(guildId, userId, uri).changes > 0;
-}
-
-export function listFavorites(guildId, userId, limit = 25) {
-  return listFavoritesStmt.all(guildId, userId, limit);
-}
+const getSettingsStmt = db.prepare('SELECT autoplay_mode FROM guild_settings WHERE guild_id=?');
+const setSettingsStmt = db.prepare(`INSERT INTO guild_settings (guild_id, autoplay_mode, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(guild_id) DO UPDATE SET autoplay_mode=excluded.autoplay_mode, updated_at=excluded.updated_at`);
 
 export function addHistory(guildId, userId, track) {
   const info = trackToInfo(track);
@@ -58,6 +50,17 @@ export function addHistory(guildId, userId, track) {
 
 export function recentHistory(guildId, limit = 20) {
   return recentHistoryStmt.all(guildId, limit);
+}
+
+export function getAutoplayMode(guildId) {
+  const mode = getSettingsStmt.get(guildId)?.autoplay_mode;
+  return mode === 'standard' || mode === 'ai' ? mode : 'off';
+}
+
+export function setAutoplayMode(guildId, mode) {
+  if (!['off', 'standard', 'ai'].includes(mode)) throw new Error(`Invalid autoplay mode: ${mode}`);
+  setSettingsStmt.run(guildId, mode, Date.now());
+  return mode;
 }
 
 export function trackToInfo(track) {
