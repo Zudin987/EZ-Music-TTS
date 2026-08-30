@@ -146,7 +146,7 @@ call stop-bot.bat /quiet /lavalink-only
 exit /b %BOT_EXIT%
 
 :bot_running
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$expected=Join-Path $env:EZ_MUSIC_ROOT 'src\index.js'; $pidFile=$env:BOT_PID_FILE; $matches={param($p) $p -and ([string]$p.Name -match '^node(\.exe)?$') -and ([string]$p.CommandLine).IndexOf($expected,[StringComparison]::OrdinalIgnoreCase) -ge 0}; if(Test-Path -LiteralPath $pidFile){$raw=(Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim(); if($raw -match '^\d+$'){$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$raw) -ErrorAction SilentlyContinue; if(& $matches $p){exit 0}}}; $p=Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" -ErrorAction SilentlyContinue | Where-Object {& $matches $_} | Select-Object -First 1; if($p){Set-Content -LiteralPath $pidFile -Value $p.ProcessId -Encoding ascii; exit 0}; exit 1" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$expected=Join-Path $env:EZ_MUSIC_ROOT 'src\index.js'; $pidFile=$env:BOT_PID_FILE; $matches={param($p) $p -and ([string]$p.Name -match '^node(\.exe)?$') -and ([string]$p.CommandLine).IndexOf($expected,[StringComparison]::OrdinalIgnoreCase) -ge 0}; if(Test-Path -LiteralPath $pidFile){$raw=(Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim(); if($raw -match '^\d+$'){$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$raw) -ErrorAction SilentlyContinue; if(& $matches $p){exit 0}}}; $p=Get-CimInstance Win32_Process -Filter 'Name=''node.exe''' -ErrorAction SilentlyContinue | Where-Object {& $matches $_} | Select-Object -First 1; if($p){Set-Content -LiteralPath $pidFile -Value $p.ProcessId -Encoding ascii; exit 0}; exit 1" >nul 2>nul
 exit /b %ERRORLEVEL%
 
 :lavalink_ready
