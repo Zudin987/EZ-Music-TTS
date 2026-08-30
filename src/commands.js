@@ -12,11 +12,11 @@ export const commandDefinitions = [
   new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
   new SlashCommandBuilder().setName('skip').setDescription('Skip the current song'),
   new SlashCommandBuilder().setName('previous').setDescription('Replay the previous song'),
-  new SlashCommandBuilder().setName('stop').setDescription('Stop playback and clear the queue'),
+  new SlashCommandBuilder().setName('stop').setDescription('Stop playback and fully reset the active queue'),
   new SlashCommandBuilder().setName('disconnect').setDescription('Leave the voice channel'),
   new SlashCommandBuilder().setName('volume').setDescription('Set persistent playback volume').addIntegerOption(o => o.setName('percent').setDescription('0-100').setMinValue(0).setMaxValue(100).setRequired(true)),
   new SlashCommandBuilder().setName('nowplaying').setDescription('Show your private player panel'),
-  new SlashCommandBuilder().setName('clear').setDescription('Clear all upcoming songs'),
+  new SlashCommandBuilder().setName('clear').setDescription('Clear upcoming songs and prevent automatic refill'),
   new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle upcoming songs'),
   new SlashCommandBuilder().setName('loop').setDescription('Set loop mode').addStringOption(o => o.setName('mode').setDescription('Loop mode').setRequired(true).addChoices({name:'Off',value:'none'},{name:'Track',value:'track'},{name:'Queue',value:'queue'})),
   new SlashCommandBuilder().setName('autoplay').setDescription('Turn source-based autoplay on or off').addStringOption(o => o.setName('mode').setDescription('Autoplay').setRequired(true).addChoices({name:'On',value:'on'},{name:'Off',value:'off'})),
@@ -25,7 +25,7 @@ export const commandDefinitions = [
     .addStringOption(o => o.setName('request').setDescription('Natural-language music request').setRequired(false).setMaxLength(500))
     .addStringOption(o => o.setName('autoplay').setDescription('AI autoplay').setRequired(false).addChoices({name:'On',value:'on'},{name:'Off',value:'off'})),
   new SlashCommandBuilder().setName('help').setDescription('Show commands'),
-  new SlashCommandBuilder().setName('ping').setDescription('Show Discord latency'),
+  new SlashCommandBuilder().setName('ping').setDescription('Show Discord gateway latency'),
   new SlashCommandBuilder().setName('status').setDescription('Show music bot status'),
 ].map(x => x.toJSON());
 
@@ -57,7 +57,7 @@ function playerPanelPayload(player, autoplayMode) {
 
 function getPlayer(music, guildId) {
   const player = music.players.get(guildId);
-  if (!player) throw new Error('Nothing is playing.');
+  if (!player) throw new Error('The bot is not connected to voice.');
   return player;
 }
 
@@ -77,6 +77,56 @@ function requireCurrentTrack(player) {
   if (!player?.queue?.current) throw new Error('Nothing is playing.');
 }
 
+function expectedError(message) {
+  const error = new Error(message);
+  error.expected = true;
+  return error;
+}
+
+function assertQueueRequestActive(music, player, guildId, revision, isQueueRevisionCurrent) {
+  if (music.players.get(guildId) !== player || !isQueueRevisionCurrent(guildId, revision)) {
+    throw expectedError('Request canceled because the queue was cleared, stopped, or disconnected before it finished.');
+  }
+}
+
+function clearUpcomingQueue(player, guildId, { setGuildAutoplay, invalidateQueueWork }) {
+  const removed = Number(player.queue.length || 0);
+  invalidateQueueWork(guildId);
+  player.setLoop('none');
+  setGuildAutoplay(guildId, 'off');
+  player.queue.clear();
+  return removed;
+}
+
+async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidateQueueWork }) {
+  const removed = Number(player.queue.length || 0);
+  invalidateQueueWork(guildId);
+  player.setLoop('none');
+  setGuildAutoplay(guildId, 'off');
+  player.queue.clear();
+  if (Array.isArray(player.queue.previous)) player.queue.previous.splice(0, player.queue.previous.length);
+
+  if (player.queue.current) {
+    // A paused Lavalink player remains paused across track changes unless it is
+    // explicitly unpaused. Reset both layers before stopping so the next /play
+    // cannot get stuck as "queued" with no audio.
+    if (player.paused || player.shoukaku?.paused) {
+      try { await player.shoukaku.setPaused(false); } catch { /* stop below still wins */ }
+      player.paused = false;
+    }
+    // Null the logical current track before stopTrack. Kazagumo normally moves
+    // a stopped current track into queue.previous from its end event; doing this
+    // makes /stop a true reset instead of allowing /previous to resurrect it.
+    player.queue.current = null;
+    player.skip();
+  } else {
+    player.paused = false;
+    player.playing = false;
+  }
+
+  return removed;
+}
+
 function skipCurrent(player) {
   requireCurrentTrack(player);
   // Kazagumo requeues the current track when track-loop is active, so /skip
@@ -91,22 +141,25 @@ async function searchTracks(player, query, requester) {
   return { result, tracks: result.type === 'PLAYLIST' ? [...result.tracks] : [result.tracks[0]] };
 }
 
-async function searchAndQueue(player, query, requester, next = false) {
+async function searchAndQueue(player, query, requester, next = false, guard = () => {}) {
   const { tracks, result } = await searchTracks(player, query, requester);
+  guard();
   if (next) player.queue.unshift(...tracks);
   else player.queue.add([...tracks]);
   if (!player.playing && !player.paused) await player.play();
   return { tracks, result };
 }
 
-async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3) {
+async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3, guard = () => {}) {
   const added = [];
   const cleanQueries = (queries || []).filter(Boolean);
   const width = Math.max(1, Math.min(5, concurrency));
 
   for (let offset = 0; offset < cleanQueries.length && added.length < limit; offset += width) {
+    guard();
     const batch = cleanQueries.slice(offset, offset + width);
     const results = await Promise.all(batch.map((query) => player.search(query, { requester }).catch(() => null)));
+    guard();
     for (const result of results) {
       const track = result?.tracks?.find((candidate) => {
         const key = trackKey(candidate);
@@ -136,21 +189,48 @@ function helpText() {
     '`/help` `/ping` `/status`',
     '',
     'All command replies and the `/nowplaying` control panel are private to the person who invoked them, so the music text channel stays empty.',
+    '`/clear` keeps the current song playing, removes everything upcoming, and turns loop/autoplay off so the queue stays clear.',
+    '`/stop` stops the current song and fully resets the active queue/previous list.',
     'Volume is saved for the server and remains in effect across disconnects and bot restarts until changed again.',
-    'The private player panel has Previous, Loop, Pause/Resume, Shuffle, Skip, Queue, Clear, Stop, Autoplay and Volume controls.',
     'Playback is raw: no filters, EQ, nightcore, karaoke, 8D, pitch/speed or other DSP effects.',
   ].join('\n');
 }
 
-export function createInteractionHandler({ client, music, ensurePlayer, gemini, startServerRadio, setGuildAutoplay, getGuildAutoplay, getGuildVolume, setGuildVolume }) {
+export function createInteractionHandler({
+  client,
+  music,
+  ensurePlayer,
+  gemini,
+  startServerRadio,
+  setGuildAutoplay,
+  getGuildAutoplay,
+  getGuildVolume,
+  setGuildVolume,
+  getQueueRevision,
+  invalidateQueueWork,
+  isQueueRevisionCurrent,
+}) {
+  const queueControls = { setGuildAutoplay, invalidateQueueWork };
+
   return async function handle(interaction) {
     try {
-      if (interaction.isButton()) return await handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume });
+      if (interaction.isButton()) {
+        return await handleButton(interaction, {
+          music,
+          gemini,
+          setGuildAutoplay,
+          getGuildAutoplay,
+          setGuildVolume,
+          invalidateQueueWork,
+        });
+      }
       if (!interaction.isChatInputCommand()) return;
 
       const name = interaction.commandName;
       if (name === 'help') return privateReply(interaction, helpText());
-      if (name === 'ping') return privateReply(interaction, `🏓 Discord gateway: **${Math.max(0, Math.round(client.ws.ping))} ms**`);
+      if (name === 'ping') {
+        return privateReply(interaction, `🏓 Discord gateway: **${Math.max(0, Math.round(client.ws.ping))} ms**. Voice/audio latency is separate and is shown in \`/status\` while connected.`);
+      }
       if (name === 'status') {
         const player = music.players.get(interaction.guildId);
         const mode = getGuildAutoplay(interaction.guildId);
@@ -158,14 +238,19 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         let lavalink = 'Unavailable';
         try { await music.getLeastUsedNode(); lavalink = 'Connected'; } catch { /* no online node */ }
         const lines = [
-          `Discord: **Online** (${Math.max(0, Math.round(client.ws.ping))} ms)`,
+          `Discord gateway: **Online** (${Math.max(0, Math.round(client.ws.ping))} ms)`,
           `Lavalink: **${lavalink}**`,
           `Gemini: **${gemini.enabled ? `Configured (${gemini.model})` : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
-          `Volume: **${volume}%**`,
+          `Saved volume: **${volume}%**`,
           `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
         ];
-        if (player) lines.push(`Queue: **${player.queue.length}** | Loop: **${player.loop || 'none'}**`);
+        if (player) {
+          const voicePing = Number(player.shoukaku?.ping ?? 0);
+          lines.push(`Voice transport: **${voicePing > 0 ? `${Math.round(voicePing)} ms` : 'connected / measuring'}**`);
+          if (player.queue.current) lines.push(`Current: **${safeTitle(player.queue.current, 100)}**`);
+          lines.push(`Up next: **${player.queue.length}** | Loop: **${player.loop || 'none'}**`);
+        }
         return privateReply(interaction, lines.join('\n'));
       }
 
@@ -183,7 +268,9 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
       if (name === 'play' || name === 'playnext') {
         await privateDefer(interaction);
         const player = await ensurePlayer(interaction);
-        const { tracks, result } = await searchAndQueue(player, interaction.options.getString('query', true), interaction.user, name === 'playnext');
+        const revision = getQueueRevision(interaction.guildId);
+        const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);
+        const { tracks, result } = await searchAndQueue(player, interaction.options.getString('query', true), interaction.user, name === 'playnext', guard);
         const where = name === 'playnext' ? 'Queued next' : 'Queued';
         return interaction.editReply(result.type === 'PLAYLIST' ? `${where} **${tracks.length} tracks**.` : `${where} **${safeTitle(tracks[0])}**.`);
       }
@@ -199,10 +286,15 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
           setGuildAutoplay(interaction.guildId, mode);
           return privateReply(interaction, `🤖 AI autoplay: **${autoplay.toUpperCase()}**.`);
         }
+
         await privateDefer(interaction);
+        const player = await ensurePlayer(interaction);
+        const revision = getQueueRevision(interaction.guildId);
+        const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);
         const recent = recentHistory(interaction.guildId, 20);
         const plan = await gemini.makeQueue(request, { recent, maxSongs: 10 });
-        const player = await ensurePlayer(interaction);
+        guard();
+
         const seen = new Set(recent.map((row) => trackKey(row)).filter(Boolean));
         if (player.queue.current) {
           const key = trackKey(player.queue.current);
@@ -212,7 +304,9 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
           const key = trackKey(track);
           if (key) seen.add(key);
         }
-        const added = await resolveSearchQueries(player, plan.queries, interaction.user, seen, 10, 3);
+
+        const added = await resolveSearchQueries(player, plan.queries, interaction.user, seen, 10, 3, guard);
+        guard();
         if (!added.length) throw new Error('Gemini suggested songs, but none could be resolved by the music source.');
         player.queue.add([...added]);
         if (!player.playing && !player.paused) await player.play();
@@ -230,7 +324,8 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         if (!recentHistory(interaction.guildId, 1).length) throw new Error('Server radio needs some listening history first. Play a few songs, then try again.');
         await privateDefer(interaction);
         const player = await ensurePlayer(interaction);
-        const count = await startServerRadio(player, interaction.user);
+        const revision = getQueueRevision(interaction.guildId);
+        const count = await startServerRadio(player, interaction.user, revision);
         return interaction.editReply(`📻 Server radio queued **${count} tracks** based on this server's listening history.`);
       }
 
@@ -253,26 +348,32 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         return privateReply(interaction, `Playing previous: **${safeTitle(prev)}**.`);
       }
       if (name === 'stop') {
-        player.queue.clear();
-        player.setLoop('none');
-        setGuildAutoplay(interaction.guildId, 'off');
-        if (player.queue.current) player.skip();
-        return privateReply(interaction, 'Stopped and cleared the queue.');
+        const removed = await stopAndResetPlayer(player, interaction.guildId, queueControls);
+        return privateReply(interaction, `Stopped. Cleared **${removed} upcoming track${removed === 1 ? '' : 's'}**, previous-track state, loop, and autoplay.`);
       }
       if (name === 'disconnect') {
         await privateDefer(interaction);
+        invalidateQueueWork(interaction.guildId);
         await player.destroy();
         return interaction.editReply('Disconnected.');
       }
-      if (name === 'clear') { player.queue.clear(); return privateReply(interaction, 'Upcoming queue cleared.'); }
-      if (name === 'shuffle') { player.queue.shuffle(); return privateReply(interaction, 'Queue shuffled.'); }
+      if (name === 'clear') {
+        const removed = clearUpcomingQueue(player, interaction.guildId, queueControls);
+        const prefix = removed ? `Cleared **${removed} upcoming track${removed === 1 ? '' : 's'}**.` : 'The upcoming queue was already empty.';
+        return privateReply(interaction, `${prefix} Current song keeps playing; loop and autoplay are **OFF** so the queue stays clear.`);
+      }
+      if (name === 'shuffle') {
+        if (player.queue.length < 2) return privateReply(interaction, 'Need at least **2 upcoming songs** to shuffle.');
+        player.queue.shuffle();
+        return privateReply(interaction, `Shuffled **${player.queue.length} upcoming tracks**.`);
+      }
       if (name === 'loop') {
         const mode = interaction.options.getString('mode', true);
         player.setLoop(mode);
         return privateReply(interaction, `Loop: **${mode === 'none' ? 'off' : mode}**.`);
       }
     } catch (error) {
-      console.error('[interaction]', error);
+      if (!error?.expected) console.error('[interaction]', error);
       const message = `⚠️ ${truncate(error?.message || 'Something went wrong.', 1800)}`;
       if (interaction.isButton()) {
         if (interaction.deferred || interaction.replied) return interaction.followUp({ flags: PRIVATE_FLAGS, content: message }).catch(() => {});
@@ -284,17 +385,24 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
   };
 }
 
-async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume }) {
+async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume, invalidateQueueWork }) {
   const player = getPlayer(music, interaction.guildId);
   const action = interaction.customId.split(':')[1];
 
   if (action === 'queue') return privateReply(interaction, queueText(player));
+  if (action === 'refresh') {
+    await interaction.deferUpdate();
+    return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId)));
+  }
+
   requireSameVoice(interaction, player);
 
   if (action === 'previous' && !player.getPrevious(false)) throw new Error('No previous song is available.');
 
   await interaction.deferUpdate();
   let settle = false;
+  let notice = null;
+  const queueControls = { setGuildAutoplay, invalidateQueueWork };
 
   if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }
   else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }
@@ -306,14 +414,17 @@ async function handleButton(interaction, { music, gemini, setGuildAutoplay, getG
     player.getPrevious(true);
     settle = true;
   }
-  else if (action === 'shuffle') player.queue.shuffle();
-  else if (action === 'clear') player.queue.clear();
+  else if (action === 'shuffle') {
+    if (player.queue.length < 2) notice = 'Need at least 2 upcoming songs to shuffle.';
+    else player.queue.shuffle();
+  }
+  else if (action === 'clear') {
+    const removed = clearUpcomingQueue(player, interaction.guildId, queueControls);
+    notice = removed ? `🧹 Cleared ${removed} upcoming track${removed === 1 ? '' : 's'}. Loop and autoplay are off.` : '🧹 Queue already empty. Loop and autoplay are off.';
+  }
   else if (action === 'stop') {
-    player.queue.clear();
-    player.setLoop('none');
-    setGuildAutoplay(interaction.guildId, 'off');
-    if (player.queue.current) player.skip();
-    return interaction.editReply({ content: 'Stopped and cleared the queue.', embeds: [], components: [] });
+    const removed = await stopAndResetPlayer(player, interaction.guildId, queueControls);
+    return interaction.editReply({ content: `Stopped and reset. Cleared ${removed} upcoming track${removed === 1 ? '' : 's'}.`, embeds: [], components: [] });
   } else if (action === 'loop') {
     const next = player.loop === 'none' ? 'track' : player.loop === 'track' ? 'queue' : 'none';
     player.setLoop(next);
@@ -334,5 +445,7 @@ async function handleButton(interaction, { music, gemini, setGuildAutoplay, getG
   }
 
   if (settle) await new Promise((resolve) => setTimeout(resolve, 350));
-  return interaction.editReply(playerPanelPayload(player, getGuildAutoplay(interaction.guildId)));
+  const payload = playerPanelPayload(player, getGuildAutoplay(interaction.guildId));
+  if (notice) payload.content = notice;
+  return interaction.editReply(payload);
 }
