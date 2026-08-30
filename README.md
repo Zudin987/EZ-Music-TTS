@@ -1,15 +1,17 @@
 # EZ Music
 
-Private single-server Discord music bot with raw/original playback, a JukeBox-style player panel, server radio, autoplay, and an optional Gemini AI DJ.
+Private single-server Discord music bot with raw/original playback, private controls, server radio, autoplay, persistent volume, and an optional Gemini AI DJ.
 
-## Important design rules
+## Design rules
 
 - Raw/original playback first.
 - No nightcore, karaoke, 8D, EQ, pitch, speed, bass boost, distortion, or other DSP effects.
-- Normal volume control is retained.
-- Gemini is optional and never sits in the audio path; normal music still works if Gemini is unavailable.
-- Lavalink runs **natively on Windows**. Docker and WSL are not required.
-- Lavalink binds to `127.0.0.1` only and is not exposed to your LAN.
+- Volume is the only audio control and is persisted locally until changed again.
+- All slash-command replies and the `/nowplaying` control panel are private/ephemeral, so the music text channel can stay empty.
+- Gemini is optional and never sits in the audio path.
+- Lavalink runs natively on Windows; Docker and WSL are not required.
+- Lavalink binds to `127.0.0.1` only.
+- Generic Lavalink HTTP playback is disabled so Discord users cannot make the host fetch arbitrary URLs from the PC/LAN.
 - Listening history stays local in `data/ez-music.sqlite` and is bounded to the newest 5,000 entries per server.
 
 ## Commands
@@ -18,13 +20,15 @@ Private single-server Discord music bot with raw/original playback, a JukeBox-st
 
 There is deliberately no public `/queue` slash command. Queue viewing is a private button on the player panel.
 
-## Player UI
+`/volume 35` works even while the bot is disconnected. The value is saved in SQLite and becomes the volume for future sessions until another volume command/button changes it. `/status` always shows the saved volume.
 
-The persistent Now Playing panel is edited as tracks change instead of posting a new control panel every song. It shows artwork, title, artist, duration, requester, Up Next, volume, loop, autoplay, and queue summary.
+## Private player UI
+
+Run `/nowplaying` while music is playing to open your private JukeBox-style panel. It shows artwork, title, artist, duration, requester, Up Next, volume, loop, autoplay, and queue information.
 
 Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+
 
-The voice-channel status is updated to:
+The bot also updates the Discord voice-channel status to:
 
 ```text
 Playing: Song Title • Artist
@@ -36,31 +40,19 @@ Grant the bot **Set Voice Channel Status** permission for this feature.
 
 # Windows setup — no Docker
 
-## 1. Install Node.js
+## 1. Requirements
 
-Install **Node.js 22.14.0 or newer**. A current Node 22 LTS or newer release is recommended.
+- Node.js **22.14.0 or newer**
+- Java **17 or newer**
 
 Check in Command Prompt:
 
 ```bat
 node -v
-```
-
-## 2. Install Java
-
-Lavalink 4 requires **Java 17 or newer**. A normal JRE is enough; you do not need a full development environment.
-
-Recommended: Eclipse Temurin 17 JRE.
-
-After installing Java, close and reopen Command Prompt/File Explorer windows if necessary, then check:
-
-```bat
 java -version
 ```
 
-You should see version 17 or newer.
-
-## 3. Fill `.env`
+## 2. Fill `.env`
 
 Only the three Discord values are mandatory. Gemini is optional.
 
@@ -80,9 +72,9 @@ DEFAULT_VOLUME=80
 AUTO_DISCONNECT_MINUTES=10
 ```
 
-Leave the Lavalink values unchanged for the normal local setup.
+Leave the Lavalink values unchanged for the normal local setup. `DEFAULT_VOLUME` is only the fallback until a saved `/volume` value exists.
 
-## 4. Run `setup.bat` once
+## 3. Run setup once
 
 Double-click:
 
@@ -90,18 +82,9 @@ Double-click:
 setup.bat
 ```
 
-It will:
+It verifies Node/Java, downloads and SHA-256 verifies Lavalink 4.2.2 when needed, preserves an existing `.env`, and installs Node dependencies.
 
-- verify Node.js 22.14+
-- verify Java 17+
-- download the pinned **Lavalink 4.2.2** standalone jar (~100 MB) if missing
-- verify the official jar with its SHA-256 digest
-- preserve an existing `.env`
-- run `npm install`
-
-No Docker Desktop, Docker daemon, Hyper-V, or WSL is needed.
-
-## 5. Start the bot
+## 4. Normal visible start
 
 Double-click:
 
@@ -109,46 +92,96 @@ Double-click:
 start-bot.bat
 ```
 
-The launcher starts Lavalink as a hidden native Java process with:
+Lavalink runs as a hidden Java process with `-Xms128M -Xmx512M`; the Discord bot runs in the visible console. The launcher refuses to start a duplicate Discord process and verifies that port `2333` is the expected local Lavalink service.
+
+## 5. Hidden start
+
+Double-click:
 
 ```text
--Xms128M -Xmx512M
+start-hidden.vbs
 ```
 
-It waits until `http://127.0.0.1:2333` is actually ready, then starts the Discord bot in the visible console.
+No console window is shown. Output is written to:
 
-If port `2333` is already occupied by another program, the launcher stops instead of silently connecting to an unknown service.
+```text
+logs\launcher.log
+```
 
-## 6. First Discord test
+The launcher log rotates at 5 MiB to `logs\launcher-old.log`. Lavalink keeps its own logs under `lavalink\`.
 
-Join the voice channel and run:
+## 6. Automatic hidden startup with Task Scheduler
+
+Double-click:
+
+```text
+install-autostart.bat
+```
+
+It creates a Task Scheduler task named **EZ Music Bot** for the current Windows user. The task:
+
+- starts at Windows sign-in
+- runs `start-hidden.vbs`
+- uses **Limited** run level rather than Administrator
+- stores no Windows password
+- ignores duplicate task launches
+- can restart the bot after an unexpected failure
+- does not stop just because the laptop switches to battery power
+
+If Task Scheduler returns Access Denied, right-click `install-autostart.bat` and choose **Run as administrator** once.
+
+The task intentionally uses **At log on** instead of SYSTEM/boot startup. This is safer for a desktop bot because it inherits your normal Node/Java environment and requires no stored account password.
+
+To remove the scheduled task:
+
+```text
+remove-autostart.bat
+```
+
+If you move the EZ Music folder later, rerun `install-autostart.bat` so Task Scheduler gets the new path.
+
+## 7. Stop everything
+
+For either visible or hidden mode, run:
+
+```text
+stop-bot.bat
+```
+
+It stops both the Discord Node process and Lavalink. PID/process checks verify the command lines before terminating them, so stale PID files should not kill unrelated programs. An intentional stop is marked so Task Scheduler does not immediately restart the bot as though it crashed.
+
+---
+
+# Music sources
+
+- YouTube search/videos/playlists through the maintained `youtube-source` plugin.
+- The repository currently pins an upstream August 2026 snapshot because formal release 1.18.2 predates recent YouTube Android/iOS/TV playback breakages.
+- SoundCloud.
+- Bandcamp.
+- Generic direct HTTP playback is intentionally disabled for host/LAN safety.
+
+The built-in Lavalink YouTube source remains disabled in favor of the plugin.
+
+# First test
+
+Join a voice channel and run:
 
 ```text
 /status
+/volume 35
 /play mirrors justin timberlake
 ```
 
-Expected:
+Expected: Discord Online, Lavalink Connected, saved volume shown, bot joins voice, music starts, and the voice status shows `Playing: ...`. The text channel itself stays clean because responses are private.
 
-- Discord: Online
-- Lavalink: Connected
-- bot joins your voice channel
-- music starts
-- JukeBox-style Now Playing panel appears
-- voice-channel status changes to `Playing: ...`
-
-Then test:
+Important regression check:
 
 ```text
-/playnext another song
-/shuffle
 /loop track
 /skip
-/volume 50
-/autoplay on
 ```
 
-Important regression check: `/loop track` followed by `/skip` must actually skip instead of restarting the same track.
+The skip must move on instead of replaying the looped track.
 
 For Gemini AI DJ:
 
@@ -157,82 +190,32 @@ For Gemini AI DJ:
 /ai autoplay:on
 ```
 
-For server radio, play several songs first so there is listening history, then:
-
-```text
-/radio server
-```
-
-## 7. Stop everything
-
-Normally press **Ctrl+C** in the bot console. The launcher attempts to stop the Lavalink process that it started when the Node process exits.
-
-If Lavalink remains running, double-click:
-
-```text
-stop-bot.bat
-```
-
-The stop script checks that the saved PID still belongs to a Java command running `Lavalink.jar` before it kills anything, so a stale PID file cannot kill an unrelated process.
-
----
-
-# Resource use
-
-This native setup avoids Docker/WSL overhead. Lavalink is launched with a 512 MB maximum Java heap. The actual Java process normally uses less than that when lightly loaded, while the Node bot adds its own smaller memory footprint.
-
-The 512 MB value is a **maximum heap cap**, not guaranteed constant RAM use.
-
----
-
-# Music sources
-
-Default Lavalink sources:
-
-- YouTube search/videos/playlists through `youtube-source` 1.18.2
-- SoundCloud
-- Bandcamp
-- direct HTTP audio supported by Lavalink
-
-The built-in Lavalink YouTube source is disabled in favor of the maintained plugin.
-
 # Troubleshooting
 
-### `setup.bat` says Java is missing
+### Hidden bot appears offline
 
-Install Java 17+ and then run `setup.bat` again. `java -version` must work from a new Command Prompt.
-
-### Lavalink does not become ready
-
-Look at:
+Check:
 
 ```text
+logs\launcher.log
 lavalink\lavalink.log
 lavalink\lavalink-error.log
 ```
 
-The launcher prints the most recent lines automatically when startup times out.
+### YouTube suddenly stops playing
 
-### Bot joins but cannot play YouTube
-
-Check the Lavalink logs. YouTube changes occasionally require a newer `youtube-source` plugin.
+YouTube regularly changes playback requirements. Check the Lavalink logs first; the pinned `youtube-source` snapshot may need to be advanced again.
 
 ### Voice-channel song status does not appear
 
-Grant **Set Voice Channel Status** to the bot role and reconnect/restart playback.
+Grant **Set Voice Channel Status** to the bot role.
 
 ### `/ai` says Gemini is not configured
 
-Put a Google AI Studio API key in `GEMINI_API_KEY` and restart the bot. The key may be the same one used by another local project, but quotas are shared by Google project/model as applicable.
+Put a Google AI Studio API key in `GEMINI_API_KEY` and restart the bot.
 
 # Development validation
 
-GitHub Actions validates:
+GitHub Actions validates Node syntax/regression tests on Windows and Ubuntu, SQLite startup/migrations, standalone Lavalink 4.2.2 startup, the official Lavalink jar SHA-256, and loading of the configured YouTube plugin/source manager.
 
-- Node syntax and regression tests on Ubuntu and Windows using Node 22.14.0
-- SQLite startup
-- standalone Java 17 Lavalink 4.2.2 startup
-- official Lavalink jar SHA-256
-- YouTube plugin/source-manager loading through `/v4/info`
-
-PR #1 remains Draft until real Discord voice playback is tested on the target server.
+PR #1 remains Draft until real Discord voice playback and hidden-start behavior are accepted on the target Windows machine.
