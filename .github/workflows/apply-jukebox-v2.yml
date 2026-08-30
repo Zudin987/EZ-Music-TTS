@@ -260,9 +260,24 @@ jobs:
 
           old_library_back = """    const recovery = getRecoverableSession(interaction.guildId);
             return interaction.editReply({ content: 'Library closed. Use `/status` for full bot health.', embeds: [], components: statusButtons({ hasRecovery: Boolean(recovery) }) });"""
-          new_library_back = """    getRecoverableSession(interaction.guildId); // keep recovery lookup side effects/expiry cleanup
-            return interaction.editReply(playbackToolsPayload(null, getGuildAutoplay(interaction.guildId), 'Library closed. Use `/status` for full bot health.'));"""
-          commands = replace_once(commands, old_library_back, new_library_back, 'libraryback V2')
+          if old_library_back not in commands:
+              old_library_back = """  const recovery = getRecoverableSession(interaction.guildId);
+            return interaction.editReply({ content: 'Library closed. Use `/status` for full bot health.', embeds: [], components: statusButtons({ hasRecovery: Boolean(recovery) }) });"""
+          if old_library_back in commands:
+              commands = commands.replace(
+                  old_library_back,
+                  """    return interaction.editReply(playbackToolsPayload(null, getGuildAutoplay(interaction.guildId), 'Library closed. Use `/status` for full bot health.'));""",
+                  1,
+              )
+          else:
+              commands, n = re.subn(
+                  r"\s*const recovery = getRecoverableSession\(interaction\.guildId\);\n\s*return interaction\.editReply\(\{ content: 'Library closed\. Use `/status` for full bot health\.', embeds: \[\], components: statusButtons\(\{ hasRecovery: Boolean\(recovery\) \}\) \}\);",
+                  "\n    return interaction.editReply(playbackToolsPayload(null, getGuildAutoplay(interaction.guildId), 'Library closed. Use `/status` for full bot health.'));",
+                  commands,
+                  count=1,
+              )
+              if n != 1:
+                  raise SystemExit(f'libraryback V2 replacement count {n}')
 
           old_stop = """      return interaction.editReply({ content: `Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`, embeds: [], components: statusButtons() });"""
           new_stop = """      return interaction.editReply(panelPayload(player, interaction.guildId, `⏹️ Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`));"""
