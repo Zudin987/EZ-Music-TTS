@@ -14,7 +14,7 @@ export const commandDefinitions = [
   new SlashCommandBuilder().setName('previous').setDescription('Replay the previous song'),
   new SlashCommandBuilder().setName('stop').setDescription('Stop playback and clear the queue'),
   new SlashCommandBuilder().setName('disconnect').setDescription('Leave the voice channel'),
-  new SlashCommandBuilder().setName('volume').setDescription('Set normal playback volume').addIntegerOption(o => o.setName('percent').setDescription('0-100').setMinValue(0).setMaxValue(100).setRequired(true)),
+  new SlashCommandBuilder().setName('volume').setDescription('Set persistent playback volume').addIntegerOption(o => o.setName('percent').setDescription('0-100').setMinValue(0).setMaxValue(100).setRequired(true)),
   new SlashCommandBuilder().setName('nowplaying').setDescription('Show your private player panel'),
   new SlashCommandBuilder().setName('clear').setDescription('Clear all upcoming songs'),
   new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle upcoming songs'),
@@ -136,15 +136,16 @@ function helpText() {
     '`/help` `/ping` `/status`',
     '',
     'All command replies and the `/nowplaying` control panel are private to the person who invoked them, so the music text channel stays empty.',
+    'Volume is saved for the server and remains in effect across disconnects and bot restarts until changed again.',
     'The private player panel has Previous, Loop, Pause/Resume, Shuffle, Skip, Queue, Clear, Stop, Autoplay and Volume controls.',
     'Playback is raw: no filters, EQ, nightcore, karaoke, 8D, pitch/speed or other DSP effects.',
   ].join('\n');
 }
 
-export function createInteractionHandler({ client, music, ensurePlayer, gemini, startServerRadio, setGuildAutoplay, getGuildAutoplay }) {
+export function createInteractionHandler({ client, music, ensurePlayer, gemini, startServerRadio, setGuildAutoplay, getGuildAutoplay, getGuildVolume, setGuildVolume }) {
   return async function handle(interaction) {
     try {
-      if (interaction.isButton()) return await handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay });
+      if (interaction.isButton()) return await handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume });
       if (!interaction.isChatInputCommand()) return;
 
       const name = interaction.commandName;
@@ -153,6 +154,7 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
       if (name === 'status') {
         const player = music.players.get(interaction.guildId);
         const mode = getGuildAutoplay(interaction.guildId);
+        const volume = getGuildVolume(interaction.guildId);
         let lavalink = 'Unavailable';
         try { await music.getLeastUsedNode(); lavalink = 'Connected'; } catch { /* no online node */ }
         const lines = [
@@ -160,10 +162,22 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
           `Lavalink: **${lavalink}**`,
           `Gemini: **${gemini.enabled ? `Configured (${gemini.model})` : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
+          `Volume: **${volume}%**`,
           `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
         ];
-        if (player) lines.push(`Queue: **${player.queue.length}** | Volume: **${Math.round(player.volume)}%** | Loop: **${player.loop || 'none'}**`);
+        if (player) lines.push(`Queue: **${player.queue.length}** | Loop: **${player.loop || 'none'}**`);
         return privateReply(interaction, lines.join('\n'));
+      }
+
+      if (name === 'volume') {
+        const n = interaction.options.getInteger('percent', true);
+        const player = music.players.get(interaction.guildId);
+        if (player) {
+          requireSameVoice(interaction, player);
+          await player.setVolume(n);
+        }
+        setGuildVolume(interaction.guildId, n);
+        return privateReply(interaction, `Volume: **${n}%**. Saved until you change it again.`);
       }
 
       if (name === 'play' || name === 'playnext') {
@@ -250,11 +264,6 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         await player.destroy();
         return interaction.editReply('Disconnected.');
       }
-      if (name === 'volume') {
-        const n = interaction.options.getInteger('percent', true);
-        await player.setVolume(n);
-        return privateReply(interaction, `Volume: **${n}%**.`);
-      }
       if (name === 'clear') { player.queue.clear(); return privateReply(interaction, 'Upcoming queue cleared.'); }
       if (name === 'shuffle') { player.queue.shuffle(); return privateReply(interaction, 'Queue shuffled.'); }
       if (name === 'loop') {
@@ -275,7 +284,7 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
   };
 }
 
-async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay }) {
+async function handleButton(interaction, { music, gemini, setGuildAutoplay, getGuildAutoplay, setGuildVolume }) {
   const player = getPlayer(music, interaction.guildId);
   const action = interaction.customId.split(':')[1];
 
@@ -313,9 +322,13 @@ async function handleButton(interaction, { music, gemini, setGuildAutoplay, getG
     const next = current === 'off' ? 'standard' : current === 'standard' && gemini.enabled ? 'ai' : 'off';
     setGuildAutoplay(interaction.guildId, next);
   } else if (action === 'volume_down') {
-    await player.setVolume(Math.max(0, player.volume - 10));
+    const nextVolume = Math.max(0, player.volume - 10);
+    await player.setVolume(nextVolume);
+    setGuildVolume(interaction.guildId, nextVolume);
   } else if (action === 'volume_up') {
-    await player.setVolume(Math.min(100, player.volume + 10));
+    const nextVolume = Math.min(100, player.volume + 10);
+    await player.setVolume(nextVolume);
+    setGuildVolume(interaction.guildId, nextVolume);
   } else {
     throw new Error('Unknown player control. Run `/nowplaying` again.');
   }
