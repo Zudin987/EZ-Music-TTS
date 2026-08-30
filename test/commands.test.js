@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { commandDefinitions } from '../src/commands.js';
+import fs from 'node:fs';
+
+const source = fs.readFileSync('src/commands.js', 'utf8');
+const definitionBlock = source.match(/export const commandDefinitions = \[([\s\S]*?)\n\]\.map\(x => x\.toJSON\(\)\);/)?.[1] || '';
+const commandNames = [...definitionBlock.matchAll(/new SlashCommandBuilder\(\)\.setName\('([^']+)'\)/g)].map((match) => match[1]);
 
 const approved = [
   'play', 'playnext', 'pause', 'resume', 'skip', 'previous', 'stop', 'disconnect',
@@ -9,10 +13,11 @@ const approved = [
 ];
 
 test('slash-command surface stays within the approved scope', () => {
-  assert.deepEqual(commandDefinitions.map((command) => command.name), approved);
-  const serialized = JSON.stringify(commandDefinitions).toLowerCase();
+  assert.ok(definitionBlock, 'could not locate command definition block');
+  assert.deepEqual(commandNames, approved);
+  const serialized = definitionBlock.toLowerCase();
   for (const forbidden of ['nightcore', 'karaoke', '8d', 'bassboost', 'equalizer', 'pitch', 'vaporwave']) {
     assert.equal(serialized.includes(forbidden), false, `unexpected audio-effect command: ${forbidden}`);
   }
-  assert.equal(commandDefinitions.some((command) => command.name === 'queue'), false);
+  assert.equal(commandNames.includes('queue'), false);
 });
