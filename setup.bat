@@ -34,13 +34,29 @@ where java >nul 2>nul || (
   pause
   exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$o=(& java -version 2^>^&1 ^| Out-String); $m=[regex]::Match($o,'version\s+\"(?^<major^>\d+)'); if(-not $m.Success -or [int]$m.Groups['major'].Value -lt 17){ exit 1 }" || (
-  echo [ERROR] Java is installed, but Java 17 or newer is required.
+set "JAVA_VERSION="
+set "JAVA_MAJOR="
+for /f "tokens=3" %%V in ('java -version 2^>^&1 ^| findstr /i "version"') do if not defined JAVA_VERSION set "JAVA_VERSION=%%~V"
+for /f "tokens=1 delims=." %%M in ("%JAVA_VERSION%") do set "JAVA_MAJOR=%%M"
+if not defined JAVA_MAJOR (
+  echo [ERROR] Could not determine the installed Java version.
+  java -version
+  pause
+  exit /b 1
+)
+for /f "delims=0123456789" %%X in ("%JAVA_MAJOR%") do if not "%%~X"=="" (
+  echo [ERROR] Could not parse Java version: %JAVA_VERSION%
+  pause
+  exit /b 1
+)
+if %JAVA_MAJOR% LSS 17 (
+  echo [ERROR] Java %JAVA_VERSION% is installed, but Java 17 or newer is required.
   echo Install/update to a Java 17+ JRE, then run setup.bat again.
   echo https://adoptium.net/temurin/releases/?version=17
   pause
   exit /b 1
 )
+echo Java %JAVA_VERSION% detected.
 
 if not exist "lavalink" mkdir "lavalink"
 
