@@ -22,7 +22,8 @@ test('voice transport quality is a bounded diagnostic heuristic', () => {
 });
 
 test('YouTube client chain is short, upstream-aligned and avoids non-Opus/restricted early fallbacks', () => {
-  const section = app.split('  youtube:\n')[1]?.split('\nlogging:')[0] || '';
+  const normalized = app.replace(/\r\n/g, '\n');
+  const section = normalized.split('  youtube:\n')[1]?.split('\nlogging:')[0] || '';
   const clients = [...section.matchAll(/^      - ([A-Z0-9_]+)$/gm)].map((match) => match[1]);
   assert.deepEqual(clients, ['MUSIC', 'ANDROID_VR', 'WEB', 'WEBEMBEDDED']);
   assert.ok(!clients.includes('ANDROID'));
