@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/v015-apply.yml
       - .github/scripts/v015_patch.py
+      - .github/scripts/v015_testfix.py
 
 permissions:
   contents: write
@@ -24,8 +25,11 @@ jobs:
         with:
           node-version: 22.14.0
 
-      - name: Apply patch
+      - name: Apply product patch
         run: python3 .github/scripts/v015_patch.py
+
+      - name: Align tests
+        run: python3 .github/scripts/v015_testfix.py
 
       - name: Install dependencies
         run: npm install --package-lock=false
@@ -41,6 +45,6 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add package.json lavalink/application.yml src/music.js src/commands.js src/live-panel.js README.md test/private-interactions.test.js test/live-panel.test.js test/playback-stability.test.js
+          git add package.json lavalink/application.yml src/music.js src/commands.js src/live-panel.js README.md test/private-interactions.test.js test/live-panel.test.js test/playback-stability.test.js test/lean-runtime.test.js test/queue-controls.test.js test/source-routing.test.js
           git commit -m "feat: improve playback stability and public nowplaying"
           git push origin HEAD:feat/v015-stability-public-nowplaying
