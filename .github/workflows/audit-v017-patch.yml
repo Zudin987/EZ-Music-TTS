@@ -50,10 +50,11 @@ jobs:
           grep -q 'bufferDurationMs: 2000' lavalink/application.yml
           grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
           grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
-      - name: Commit product changes
+      - name: Commit tested non-workflow changes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          git restore -- .github/workflows/ci.yml .github/workflows/audit-v017-patch.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
