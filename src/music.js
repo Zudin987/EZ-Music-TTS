@@ -14,7 +14,7 @@ function youtubeId(track) {
 }
 
 function keyOf(track) {
-  return `${String(track?.author || '').toLowerCase()}\u0000${String(track?.title || '').toLowerCase()}`;
+  return `${String(track?.author || '').trim().toLocaleLowerCase()}\u0000${String(track?.title || '').trim().toLocaleLowerCase()}`;
 }
 
 export function createMusic(client, config, gemini) {
@@ -56,6 +56,26 @@ export function createMusic(client, config, gemini) {
 
   music.on('queueUpdate', (player) => refreshPanel(player).catch(() => {}));
 
+  music.on('playerException', (player, data) => {
+    console.warn('[player-exception]', player.guildId, data?.exception?.message || data?.message || 'track exception');
+    try {
+      if (player.queue.current) {
+        if (player.loop !== 'none') player.setLoop('none');
+        player.skip();
+      }
+    } catch (error) { console.warn('[player-exception] skip failed', error?.message || error); }
+  });
+
+  music.on('playerStuck', (player, data) => {
+    console.warn('[player-stuck]', player.guildId, data?.thresholdMs || 'unknown threshold');
+    try {
+      if (player.queue.current) {
+        if (player.loop !== 'none') player.setLoop('none');
+        player.skip();
+      }
+    } catch (error) { console.warn('[player-stuck] skip failed', error?.message || error); }
+  });
+
   music.on('playerEmpty', async (player) => {
     const filled = await refillAutoplay(player).catch((error) => {
       console.warn('[autoplay]', error?.message || error);
@@ -73,6 +93,8 @@ export function createMusic(client, config, gemini) {
     await clearVoiceStatus(player);
     await removePanel(player.guildId);
     voiceIds.delete(player.guildId);
+    lastTracks.delete(player.guildId);
+    autoplayLocks.delete(player.guildId);
   });
 
   function clearDisconnect(guildId) {
@@ -84,7 +106,9 @@ export function createMusic(client, config, gemini) {
   function scheduleDisconnect(player) {
     clearDisconnect(player.guildId);
     const timer = setTimeout(() => {
-      if (player.queue.isEmpty && !player.playing) player.destroy().catch(() => {});
+      disconnectTimers.delete(player.guildId);
+      const completelyIdle = !player.queue.current && player.queue.isEmpty && !player.playing && !player.paused;
+      if (completelyIdle) player.destroy().catch(() => {});
     }, config.autoDisconnectMinutes * 60_000);
     timer.unref?.();
     disconnectTimers.set(player.guildId, timer);
@@ -93,7 +117,7 @@ export function createMusic(client, config, gemini) {
   async function ensurePlayer(interaction) {
     const voice = interaction.member?.voice?.channel;
     if (!voice) throw new Error('Join a voice channel first.');
-    clearDisconnect(interaction.guildId);
+
     let player = music.players.get(interaction.guildId);
     if (!player) {
       player = await music.createPlayer({
@@ -104,11 +128,14 @@ export function createMusic(client, config, gemini) {
         volume: config.defaultVolume,
       });
       if (player.voiceId) voiceIds.set(player.guildId, player.voiceId);
-      scheduleDisconnect(player);
     } else {
       if (player.voiceId && player.voiceId !== voice.id) throw new Error('Join the same voice channel as the bot first.');
       player.setTextChannel(interaction.channelId);
     }
+
+    // Keep an idle player on a fresh timeout even if the upcoming search fails.
+    // playerStart clears this timer after playback actually begins.
+    if (!player.queue.current && !player.playing) scheduleDisconnect(player);
     return player;
   }
 
@@ -160,24 +187,40 @@ export function createMusic(client, config, gemini) {
     if (message) await message.delete().catch(() => {});
   }
 
-  async function standardRecommendations(player, seedTrack, limit = 5) {
+  async function standardRecommendations(player, seedTrack, limit = 5, requester = seedTrack?.requester || client.user) {
     if (!seedTrack) return [];
-    const recent = new Set(recentHistory(player.guildId, 30).map((row) => `${String(row.author).toLowerCase()}\u0000${String(row.title).toLowerCase()}`));
+    const recent = new Set(recentHistory(player.guildId, 30).map((row) => keyOf(row)));
     const seedKey = keyOf(seedTrack);
-    const usable = (tracks) => (tracks || []).filter((track) => keyOf(track) !== seedKey && !recent.has(keyOf(track))).slice(0, limit);
+    const selected = [];
+    const selectedKeys = new Set();
+
+    const takeUsable = (tracks) => {
+      for (const track of tracks || []) {
+        const key = keyOf(track);
+        if (!key || key === seedKey || recent.has(key) || selectedKeys.has(key)) continue;
+        selectedKeys.add(key);
+        selected.push(track);
+        if (selected.length >= limit) break;
+      }
+      return selected;
+    };
 
     const id = youtubeId(seedTrack);
     if (id) {
       try {
         const mixUrl = `https://www.youtube.com/watch?v=${id}&list=RD${id}`;
-        const result = await player.search(mixUrl, { requester: seedTrack?.requester || client.user });
-        const tracks = usable(result?.tracks);
-        if (tracks.length) return tracks;
+        const result = await player.search(mixUrl, { requester });
+        takeUsable(result?.tracks);
+        if (selected.length >= limit) return selected;
       } catch { /* YouTube mixes occasionally fail; use search fallback */ }
     }
 
-    const fallback = await player.search(`${seedTrack.author || ''} songs`, { requester: seedTrack?.requester || client.user }).catch(() => null);
-    return usable(fallback?.tracks);
+    const fallbackQuery = `${seedTrack.author || seedTrack.title || ''} songs`.trim();
+    if (fallbackQuery) {
+      const fallback = await player.search(fallbackQuery, { requester }).catch(() => null);
+      takeUsable(fallback?.tracks);
+    }
+    return selected.slice(0, limit);
   }
 
   async function aiRecommendations(player, limit = 5) {
@@ -185,7 +228,7 @@ export function createMusic(client, config, gemini) {
     const recent = recentHistory(player.guildId, 20);
     const plan = await gemini.makeQueue('Continue this listening session naturally. Recommend songs that fit what this server has been playing. Avoid repeats.', { recent, maxSongs: limit });
     const added = [];
-    const seen = new Set(recent.map((row) => `${String(row.author).toLowerCase()}\u0000${String(row.title).toLowerCase()}`));
+    const seen = new Set(recent.map((row) => keyOf(row)));
     for (const query of plan.queries.slice(0, limit)) {
       try {
         const result = await player.search(query, { requester: client.user });
@@ -206,7 +249,7 @@ export function createMusic(client, config, gemini) {
         ? await aiRecommendations(player, 5)
         : await standardRecommendations(player, seed, 5);
       if (!tracks.length) return false;
-      player.queue.add(tracks);
+      player.queue.add([...tracks]);
       if (!player.playing && !player.paused) await player.play();
       return true;
     } finally {
@@ -218,24 +261,28 @@ export function createMusic(client, config, gemini) {
     const history = recentHistory(player.guildId, 100);
     if (!history.length) throw new Error('Server radio needs some listening history first. Play a few songs, then try again.');
 
-    const seen = new Set(history.slice(0, 15).map((row) => `${String(row.author).toLowerCase()}\u0000${String(row.title).toLowerCase()}`));
+    const seen = new Set(history.slice(0, 15).map((row) => keyOf(row)));
     const picked = [];
-    const seeds = history.filter((row, index, rows) => rows.findIndex((other) => other.uri === row.uri) === index).slice(0, 8);
+    const uniqueSeedKeys = new Set();
+    const seeds = [];
+    for (const row of history) {
+      const key = row.uri || keyOf(row);
+      if (!key || uniqueSeedKeys.has(key)) continue;
+      uniqueSeedKeys.add(key);
+      seeds.push(row);
+      if (seeds.length >= 8) break;
+    }
 
     for (const seed of seeds) {
       if (picked.length >= 15) break;
-      const id = youtubeId({ uri: seed.uri });
-      if (!id) continue;
-      try {
-        const result = await player.search(`https://www.youtube.com/watch?v=${id}&list=RD${id}`, { requester });
-        for (const track of result?.tracks || []) {
-          const key = keyOf(track);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          picked.push(track);
-          if (picked.length >= 15) break;
-        }
-      } catch { /* try another seed */ }
+      const recommendations = await standardRecommendations(player, seed, 5, requester).catch(() => []);
+      for (const track of recommendations) {
+        const key = keyOf(track);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        picked.push(track);
+        if (picked.length >= 15) break;
+      }
     }
 
     if (picked.length < 5 && gemini?.enabled) {
@@ -247,20 +294,28 @@ export function createMusic(client, config, gemini) {
           const track = result?.tracks?.find((candidate) => !seen.has(keyOf(candidate)));
           if (track) { seen.add(keyOf(track)); picked.push(track); }
         }
-      } catch { /* history replay fallback below */ }
+      } catch (error) {
+        console.warn('[radio] Gemini enhancement unavailable:', error?.message || error);
+      }
     }
 
     if (!picked.length) {
       for (const row of seeds.slice(0, 10)) {
         const result = await player.search(row.uri || `${row.author} ${row.title}`, { requester }).catch(() => null);
-        if (result?.tracks?.[0]) picked.push(result.tracks[0]);
+        const track = result?.tracks?.[0];
+        if (!track) continue;
+        const key = keyOf(track);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        picked.push(track);
       }
     }
 
     if (!picked.length) throw new Error('Could not build server radio from the available sources.');
-    player.queue.add(picked);
+    const count = picked.length;
+    player.queue.add([...picked]);
     if (!player.playing && !player.paused) await player.play();
-    return picked.length;
+    return count;
   }
 
   function setGuildAutoplay(guildId, mode) {
