@@ -1,6 +1,6 @@
 import { Kazagumo } from 'kazagumo';
 import { Connectors } from 'shoukaku';
-import { addHistory, getAutoplayMode, recentHistory, setAutoplayMode } from './storage.js';
+import { addHistory, getAutoplayMode, getGuildVolume as getStoredVolume, recentHistory, setAutoplayMode, setGuildVolume as setStoredVolume } from './storage.js';
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 
 function youtubeId(track) {
@@ -137,7 +137,7 @@ export function createMusic(client, config, gemini) {
         textId: interaction.channelId,
         voiceId: voice.id,
         deaf: true,
-        volume: config.defaultVolume,
+        volume: getStoredVolume(interaction.guildId, config.defaultVolume),
       });
       if (player.voiceId) voiceIds.set(player.guildId, player.voiceId);
     } else {
@@ -332,11 +332,21 @@ export function createMusic(client, config, gemini) {
     return mode;
   }
 
+  function getGuildVolume(guildId) {
+    return getStoredVolume(guildId, config.defaultVolume);
+  }
+
+  function setGuildVolume(guildId, volume) {
+    return setStoredVolume(guildId, volume);
+  }
+
   return {
     music,
     ensurePlayer,
     startServerRadio,
     setGuildAutoplay,
     getGuildAutoplay: getAutoplayMode,
+    getGuildVolume,
+    setGuildVolume,
   };
 }
