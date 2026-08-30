@@ -1,4 +1,5 @@
 name: Refresh v0.1.7 Lockfile
+# one-time lock refresh for the published v12 Windows prebuild
 
 on:
   push:
