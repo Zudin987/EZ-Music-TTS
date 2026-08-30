@@ -38,9 +38,13 @@ lavalink:
     # Stability profile for a single private bot. These are buffering controls,
     # not DSP/audio effects: they do not alter pitch, speed, EQ, or the source.
     # More headroom helps absorb short source/network/GC hiccups at track start.
+    nonAllocatingFrameBuffer: true
     bufferDurationMs: 1000
     frameBufferDurationMs: 10000
     trackStuckThresholdMs: 10000
+    # 3 pages x ~100 tracks keeps huge YouTube playlists from creating large
+    # transient responses on a machine with a strict RAM budget.
+    youtubePlaylistLoadLimit: 3
 
 plugins:
   youtube:
@@ -65,3 +69,7 @@ logging:
   level:
     root: INFO
     lavalink: INFO
+  # Local private node: REST request logs add noise and allocations without
+  # helping normal operation. Re-enable temporarily only while debugging.
+  request:
+    enabled: false
