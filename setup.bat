@@ -101,7 +101,7 @@ call npm install || (
 
 echo.
 echo Setup complete. Docker is NOT required.
-echo Edit .env with your Discord token, client ID, guild ID, and optional Gemini API key.
+echo Edit .env with your Discord token, client ID, guild ID, optional Gemini API key, and optional Spotify app credentials.
 echo Then run start-bot.bat.
 pause
 exit /b 0
