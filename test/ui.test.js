@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { favoritesPayload, historyPayload, playbackToolsPayload, playerButtons, queueManagerPayload, queueText, searchPickerPayload, statusButtons, undoButtonComponents } from '../src/ui.js';
+import { MessageFlags } from 'discord.js';
+import { favoritesPayload, historyPayload, jukeboxPlayerPayload, playbackToolsPayload, playerButtons, queueManagerPayload, queueText, searchPickerPayload, statusButtons, undoButtonComponents } from '../src/ui.js';
 
 function fakeTrack(index, title = `Track ${index}`) {
   return { identifier: `track-${index}`, title, author: `Artist ${index}`, length: 240_000, isSeekable: true, isStream: false };
@@ -21,6 +22,30 @@ function fakePlayer(count = 3) {
     getPrevious: () => queue.previous[0],
   };
 }
+
+
+function nestedButtonLabels(components) {
+  const labels = [];
+  const visit = (component) => {
+    if (!component) return;
+    if (component.data?.label) labels.push(component.data.label);
+    for (const child of component.components || []) visit(child);
+  };
+  for (const component of components || []) visit(component);
+  return labels;
+}
+
+test('jukebox player uses one Components V2 container with controls inside it', () => {
+  const payload = jukeboxPlayerPayload(fakePlayer(), 'standard');
+  assert.equal(payload.flags, MessageFlags.IsComponentsV2);
+  assert.equal(payload.content, null);
+  assert.deepEqual(payload.embeds, []);
+  assert.equal(payload.components.length, 1);
+  const json = JSON.stringify(payload.components[0].toJSON());
+  assert.match(json, /Now Playing/);
+  assert.match(json, /music:pause/);
+  assert.match(json, /music:queue/);
+});
 
 test('player panel exposes only approved lightweight controls', () => {
   const labels = playerButtons(fakePlayer(), 'standard')
@@ -47,7 +72,7 @@ test('private queue manager is paged and stateless', () => {
 
 test('playback tools expose seek/replay without DSP controls', () => {
   const payload = playbackToolsPayload(fakePlayer(), 'off');
-  const labels = payload.components.flatMap((row) => row.components).map((component) => component.data.label);
+  const labels = nestedButtonLabels(payload.components);
   assert.deepEqual(labels, ['-30s', '-10s', 'Replay', '+10s', '+30s', 'Seek…', 'History', 'Favorites', 'Refresh', 'Back']);
   assert.equal(labels.some((label) => /filter|eq|pitch|speed|bass|nightcore/i.test(label)), false);
 });
