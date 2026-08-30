@@ -13,6 +13,7 @@ import {
   updateRecoveryPosition,
 } from './storage.js';
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
+import { resolvePreferredSearch } from './source-routing.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -67,73 +68,7 @@ export function createMusic(client, config, gemini) {
   const recoveryResumes = new Set();
   const spotifyConfigured = Boolean(config.spotifyClientId && config.spotifyClientSecret);
 
-  function isHttpUrl(value) {
-    try {
-      const url = new URL(String(value || '').trim());
-      return url.protocol === 'http:' || url.protocol === 'https:';
-    } catch {
-      return false;
-    }
-  }
-
-  function isSpotifyReference(value) {
-    const text = String(value || '').trim();
-    if (/^spotify:(track|album|playlist|artist):/i.test(text)) return true;
-    try {
-      const url = new URL(text);
-      const host = url.hostname.toLowerCase();
-      return host === 'open.spotify.com' || host.endsWith('.open.spotify.com');
-    } catch {
-      return false;
-    }
-  }
-
-  function isSpotifyShortLink(value) {
-    try {
-      const url = new URL(String(value || '').trim());
-      const host = url.hostname.toLowerCase();
-      return host === 'spotify.link' || host.endsWith('.spotify.link');
-    } catch {
-      return false;
-    }
-  }
-
-  function hasExplicitSearchPrefix(value) {
-    return /^(?:ytmsearch|ytsearch|scsearch|spsearch):/i.test(String(value || '').trim());
-  }
-
-  async function searchPreferred(target, query, requester) {
-    const clean = String(query || '').trim();
-    if (!clean) throw new Error('Search query is empty.');
-
-    if (isSpotifyShortLink(clean)) {
-      throw new Error('Spotify short links (spotify.link) are not supported by the current LavaSrc source. Open the link in Spotify and paste the full open.spotify.com URL instead.');
-    }
-
-    if (isSpotifyReference(clean)) {
-      if (!spotifyConfigured) {
-        throw new Error('Spotify URL support is not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to .env, then restart EZ Music.');
-      }
-      return target.search(clean, { requester });
-    }
-
-    // Never rewrite direct URLs or an explicitly requested search prefix.
-    if (isHttpUrl(clean) || hasExplicitSearchPrefix(clean)) return target.search(clean, { requester });
-
-    let ytmError = null;
-    try {
-      const ytm = await target.search(clean, { requester, source: 'ytmsearch:' });
-      if (ytm?.tracks?.length) return ytm;
-    } catch (error) {
-      ytmError = error;
-    }
-
-    try {
-      return await target.search(clean, { requester, source: 'ytsearch:' });
-    } catch (error) {
-      throw error || ytmError || new Error(`No results for: ${clean}`);
-    }
-  }
+  const searchPreferred = (target, query, requester) => resolvePreferredSearch(target, query, requester, { spotifyConfigured });
 
   async function withGuildOperation(guildId, task) {
     const previous = operationChains.get(guildId) || Promise.resolve();
