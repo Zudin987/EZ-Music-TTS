@@ -50,3 +50,5 @@ jobs:
           git rm .github/workflows/apply-live-refresh.yml .github/apply-live-refresh.py .github/fix-live-refresh-patcher.py
           git commit -m "feat: auto-refresh private JukeBox player"
           git push origin HEAD:feature/live-jukebox-refresh
+
+# staging rerun 2
