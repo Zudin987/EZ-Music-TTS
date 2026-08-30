@@ -93,16 +93,14 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    # MUSIC is search-only. Playback falls through the maintained anonymous
-    # clients with the August 2026 Android/iOS/TV fixes.
+    # Keep the playback path short and Opus-capable. This follows the current
+    # youtube-source recommended example: MUSIC searches, then playback falls
+    # through ANDROID_VR -> WEB -> WEBEMBEDDED. Avoiding regular ANDROID (marked
+    # frequently dysfunctional upstream), IOS (no Opus), and TVHTML5_SIMPLY also
+    # avoids known failed-client work before playback starts.
     clients:
       - MUSIC
-      - ANDROID
-      - IOS
-      - TVHTML5_SIMPLY
-      - ANDROID_MUSIC
       - ANDROID_VR
-      - MWEB
       - WEB
       - WEBEMBEDDED
 

@@ -24,6 +24,7 @@ import {
   undoButtonComponents,
 } from './ui.js';
 import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
+import { voiceTransportQuality } from './performance.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
 const PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications;
@@ -44,7 +45,7 @@ export const commandDefinitions = [
   new SlashCommandBuilder().setName('stop').setDescription('Stop playback and fully reset the active queue'),
   new SlashCommandBuilder().setName('disconnect').setDescription('Leave the voice channel'),
   new SlashCommandBuilder().setName('volume').setDescription('Set persistent playback volume').addIntegerOption(o => o.setName('percent').setDescription('0-100').setMinValue(0).setMaxValue(100).setRequired(true)),
-  new SlashCommandBuilder().setName('nowplaying').setDescription('Show your private player panel'),
+  new SlashCommandBuilder().setName('nowplaying').setDescription('Show the shared Now Playing player panel'),
   new SlashCommandBuilder().setName('clear').setDescription('Clear upcoming songs and prevent automatic refill'),
   new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle upcoming songs'),
   new SlashCommandBuilder().setName('loop').setDescription('Set loop mode').addStringOption(o => o.setName('mode').setDescription('Loop mode').setRequired(true).addChoices({name:'Off',value:'none'},{name:'Track',value:'track'},{name:'Queue',value:'queue'})),
@@ -362,6 +363,7 @@ function helpText() {
     '`/status` offers Resume/Discard when a recent crash/restart session is recoverable.',
     '`/clear` keeps the current song playing, clears everything upcoming, and turns loop/autoplay off.',
     '`/stop` fully resets current/upcoming/previous state. Volume stays saved until changed again.',
+    'When the last human leaves the voice channel, active playback auto-pauses immediately; returning within 2 minutes auto-resumes it. Manual pauses are never auto-resumed.',
     'Playback is raw: no filters, EQ, nightcore, karaoke, 8D, pitch/speed or other DSP effects.',
   ].join('\n');
 }
@@ -383,6 +385,7 @@ export function createInteractionHandler({
   getQueueLimit,
   getRuntimeStats,
   getSourceHealth,
+  isAutoPausedForEmptyVoice,
   discardHeldQueue,
   getHeldQueueSnapshot,
   withGuildOperation,
@@ -547,11 +550,11 @@ async function editLivePanel(interaction, player, notice = null) {
           `Spotify URL mirror: **${isSpotifyConfigured() ? 'Configured' : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Saved volume: **${volume}%**`,
-          `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
+          `Player: **${player ? (isAutoPausedForEmptyVoice(interaction.guildId) ? 'Auto-paused (empty VC)' : player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
         ];
         if (player) {
           const voicePing = Number(player.shoukaku?.ping ?? 0);
-          lines.push(`Voice transport: **${voicePing > 0 ? `${Math.round(voicePing)} ms` : 'connected / measuring'}**`);
+          lines.push(`Voice transport: **${voicePing > 0 ? `${Math.round(voicePing)} ms • ${voiceTransportQuality(voicePing)}` : 'connected / measuring'}**`);
           lines.push(...audioStreamLines(runtime, true));
           if (player.queue.current) lines.push(`Current: **${safeTitle(player.queue.current, 100)}**`);
           lines.push(`Up next: **${player.queue.length}/${queueLimit}** | Loop: **${player.loop || 'none'}**`);

@@ -14,6 +14,7 @@ import {
 } from './storage.js';
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 import { resolvePreferredSearch } from './source-routing.js';
+import { emptyVoiceTransition } from './performance.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -57,6 +58,7 @@ export function createMusic(client, config, gemini) {
   const voiceIds = new Map();
   const queueRevisions = new Map();
   const emptyVoiceTimers = new Map();
+  const emptyVoiceAutoPaused = new Set();
   const playbackFailures = new Map();
   const heldQueues = new Map();
   const sourceRetryTimers = new Map();
@@ -501,22 +503,60 @@ export function createMusic(client, config, gemini) {
 
   function evaluateVoiceOccupancy(player) {
     if (!player || music.players.get(player.guildId) !== player) return;
-    if (hasHumanListener(player)) return clearEmptyVoiceTimer(player.guildId);
-    if (emptyVoiceTimers.has(player.guildId)) return;
+    const guildId = player.guildId;
+    const hasHuman = hasHumanListener(player);
+    const transition = emptyVoiceTransition({
+      hasHuman,
+      hasCurrentTrack: Boolean(player.queue.current),
+      playing: Boolean(player.playing),
+      paused: Boolean(player.paused),
+      autoPaused: emptyVoiceAutoPaused.has(guildId),
+    });
 
+    if (hasHuman) {
+      clearEmptyVoiceTimer(guildId);
+      const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);
+      if (transition === 'resume' && wasAutoPaused) {
+        try {
+          player.pause(false);
+          scheduleRecoverySave(player, 0);
+          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);
+        } catch (error) {
+          console.warn('[voice] auto-resume failed', error?.message || error);
+        }
+      }
+      return;
+    }
+
+    if (transition === 'pause') {
+      try {
+        player.pause(true);
+        emptyVoiceAutoPaused.add(guildId);
+        scheduleRecoverySave(player, 0);
+        console.log(`[voice] channel empty; auto-paused ${guildId}`);
+      } catch (error) {
+        console.warn('[voice] auto-pause failed', error?.message || error);
+      }
+    }
+
+    if (emptyVoiceTimers.has(guildId)) return;
     const timer = setTimeout(async () => {
-      emptyVoiceTimers.delete(player.guildId);
-      if (music.players.get(player.guildId) !== player || hasHumanListener(player)) return;
-      console.log(`[voice] no human listeners for 2 minutes; disconnecting ${player.guildId}`);
-      invalidateQueueWork(player.guildId);
-      setAutoplayMode(player.guildId, 'off');
-      discardHeldQueue(player.guildId);
-      clearRecoverySession(player.guildId);
+      emptyVoiceTimers.delete(guildId);
+      if (music.players.get(guildId) !== player || hasHumanListener(player)) {
+        evaluateVoiceOccupancy(player);
+        return;
+      }
+      emptyVoiceAutoPaused.delete(guildId);
+      console.log(`[voice] no human listeners for 2 minutes; disconnecting ${guildId}`);
+      invalidateQueueWork(guildId);
+      setAutoplayMode(guildId, 'off');
+      discardHeldQueue(guildId);
+      clearRecoverySession(guildId);
       try { player.queue.clear(); } catch { /* player may already be tearing down */ }
       try { await player.destroy(); } catch (error) { console.warn('[voice] auto-leave failed', error?.message || error); }
     }, EMPTY_VOICE_GRACE_MS);
     timer.unref?.();
-    emptyVoiceTimers.set(player.guildId, timer);
+    emptyVoiceTimers.set(guildId, timer);
   }
 
   client.on('voiceStateUpdate', (oldState, newState) => {
@@ -635,6 +675,9 @@ export function createMusic(client, config, gemini) {
   }
 
   async function handlePlayerEmpty(player) {
+    // No current track means an empty-room pause marker can no longer refer to
+    // a resumable item. A future playerStart will reevaluate occupancy itself.
+    emptyVoiceAutoPaused.delete(player.guildId);
     // Kazagumo can leave its paused flag set when a paused track is skipped or
     // stopped. Normalize both the wrapper and Lavalink state before any future
     // autoplay/new play request so an old pause cannot silently block playback.
@@ -672,6 +715,7 @@ export function createMusic(client, config, gemini) {
     invalidateQueueWork(player.guildId);
     clearDisconnect(player.guildId);
     clearEmptyVoiceTimer(player.guildId);
+    emptyVoiceAutoPaused.delete(player.guildId);
     clearSourceSuccess(player.guildId);
     clearRecoverySaveTimer(player.guildId);
     recoveryPositionSavedAt.delete(player.guildId);
@@ -997,6 +1041,7 @@ export function createMusic(client, config, gemini) {
     getQueueLimit: () => MAX_UPCOMING_QUEUE,
     getRuntimeStats,
     getSourceHealth,
+    isAutoPausedForEmptyVoice: (guildId) => emptyVoiceAutoPaused.has(guildId),
     getHeldQueueCount,
     discardHeldQueue,
     getHeldQueueSnapshot,
