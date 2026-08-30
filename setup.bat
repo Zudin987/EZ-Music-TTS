@@ -3,8 +3,20 @@ setlocal
 cd /d "%~dp0"
 
 where node >nul 2>nul || (
-  echo [ERROR] Node.js 22 or newer is not installed or not in PATH.
+  echo [ERROR] Node.js 22.9.0 or newer is not installed or not in PATH.
   echo Install Node.js, then run setup.bat again.
+  pause
+  exit /b 1
+)
+
+node -e "const [M,m]=process.versions.node.split('.').map(Number);process.exit(M>22||(M===22&&m>=9)?0:1)" || (
+  for /f "delims=" %%V in ('node -p "process.versions.node"') do echo [ERROR] Node.js %%V is too old. Version 22.9.0 or newer is required.
+  pause
+  exit /b 1
+)
+
+where npm >nul 2>nul || (
+  echo [ERROR] npm is not available in PATH. Repair/reinstall Node.js.
   pause
   exit /b 1
 )
@@ -12,6 +24,12 @@ where node >nul 2>nul || (
 where docker >nul 2>nul || (
   echo [ERROR] Docker Desktop is not installed or not in PATH.
   echo Install/start Docker Desktop, then run setup.bat again.
+  pause
+  exit /b 1
+)
+
+docker compose version >nul 2>nul || (
+  echo [ERROR] Docker Compose v2 is not available. Update Docker Desktop.
   pause
   exit /b 1
 )
