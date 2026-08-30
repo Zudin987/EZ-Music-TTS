@@ -22,6 +22,8 @@ jobs:
           node-version: '22.9.0'
           package-manager-cache: false
       - run: npm install
+      - name: Smoke-test SQLite storage
+        run: node -e "import('./src/storage.js').then(({ closeStorage }) => closeStorage())"
       - run: npm run check
       - run: npm test
 
