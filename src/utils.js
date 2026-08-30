@@ -29,3 +29,28 @@ export function isUrl(value) {
     return false;
   }
 }
+
+export function trackKey(track) {
+  const author = String(track?.author || '').trim().toLocaleLowerCase();
+  const title = String(track?.title || '').trim().toLocaleLowerCase();
+  if (!author && !title) return '';
+  return `${author}\u0000${title}`;
+}
+
+export function radioFallbackHistory(history, recentCount = 15, limit = 10) {
+  const rows = Array.isArray(history) ? history : [];
+  const older = rows.slice(Math.max(0, recentCount));
+  const source = older.length ? older : rows;
+  const selected = [];
+  const seen = new Set();
+
+  for (const row of source) {
+    const key = String(row?.uri || '').trim() || trackKey(row);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    selected.push(row);
+    if (selected.length >= Math.max(1, limit)) break;
+  }
+
+  return selected;
+}
