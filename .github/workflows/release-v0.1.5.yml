@@ -1,0 +1,130 @@
+name: Publish EZ Music v0.1.5
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.5.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 8cb0969d4089bb4a26072b27782b4bb8bf7c5c6a
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./package.json').version")" = "0.1.5"
+          grep -q "bufferDurationMs: 2000" lavalink/application.yml
+          grep -q "frameBufferDurationMs: 20000" lavalink/application.yml
+          grep -q "PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications" src/commands.js
+          grep -q "Audio stream:" src/commands.js
+          grep -q "frameStats: liveStats.frameStats" src/music.js
+          grep -q '`${guildId}:public`' src/live-panel.js
+          test -f test/playback-stability.test.js
+
+      - name: Build clean Windows install ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.5"
+          ROOT="dist/EZ-Music"
+          mkdir -p "$ROOT/src" "$ROOT/lavalink"
+
+          cp README.md package.json .env.example setup.bat start-bot.bat start-hidden.vbs stop-bot.bat install-autostart.bat install-autostart.ps1 remove-autostart.bat "$ROOT/"
+          cp src/*.js "$ROOT/src/"
+          cp lavalink/application.yml "$ROOT/lavalink/"
+
+          cat > "$ROOT/CLEAN-INSTALL.txt" <<'EOF'
+          EZ MUSIC v0.1.5 CLEAN WINDOWS INSTALL
+          ====================================
+          1. Stop EZ Music.
+          2. Back up C:\EZ-Music\.env.
+          3. If you want to preserve volume, favorites, history and crash/restart recovery,
+             also back up C:\EZ-Music\data\ez-music.sqlite.
+          4. Remove or rename the old C:\EZ-Music folder for a truly clean install.
+          5. Extract this ZIP so the app lives at C:\EZ-Music.
+          6. Restore your backed-up .env to C:\EZ-Music\.env.
+          7. Restore data\ez-music.sqlite only if you intentionally backed it up.
+          8. Run setup.bat.
+          9. Test with start-bot.bat.
+          10. When satisfied, use start-hidden.vbs; reinstall Task Scheduler only if needed.
+
+          PLAYBACK STABILITY
+          ------------------
+          v0.1.5 increases Lavalink's non-DSP buffering headroom to a 2-second
+          non-allocating buffer and a 20-second frame buffer. Raw/original playback,
+          the 256 MB Lavalink JVM maximum, and the current YouTube playback-fix
+          snapshot remain unchanged.
+
+          /status now combines Lavalink REST telemetry with Shoukaku's latest
+          WebSocket frame statistics so it can show sent/nulled/deficit audio frames,
+          an audio-stream smooth/frame-starvation indicator, and Lavalink CPU load.
+
+          SHARED SILENT NOW PLAYING
+          -------------------------
+          /nowplaying is the only public slash-command response. It uses Discord's
+          Suppress Notifications flag. Queue, More, personal Favorite feedback,
+          status, search selection, errors, confirmations, history, favorites and
+          other detailed interfaces remain private/ephemeral.
+
+          Discord's silent flag suppresses push/desktop notifications, but Discord
+          does not provide a bot API flag that guarantees a visible public message
+          never affects the channel's unread indicator.
+
+          SEARCH ROUTING
+          --------------
+          Plain text /play and /playnext search YouTube Music first. If YouTube Music
+          returns no usable result or errors, EZ Music falls back once to normal YouTube.
+          Direct URLs and explicit search prefixes remain exact and are never rewritten.
+
+          OPTIONAL SPOTIFY URL MIRRORING
+          ------------------------------
+          Spotify remains optional metadata/mirroring only; audio is resolved through
+          YouTube Music / YouTube. Existing Spotify credential behavior is unchanged.
+
+          This package intentionally contains no .env, real secrets, SQLite database,
+          node_modules, logs, or Lavalink.jar. setup.bat installs/downloads required
+          runtime files. No DSP/audio filters, Docker, WSL, generic HTTP source, local
+          file source, or extra service was enabled by this update.
+          EOF
+
+          cd dist
+          zip -r -9 "EZ-Music-${VERSION}-Windows-Clean.zip" EZ-Music >/dev/null
+          sha256sum "EZ-Music-${VERSION}-Windows-Clean.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.5 >/dev/null 2>&1; then
+            echo "Release v0.1.5 already exists; leaving it unchanged."
+          else
+            gh release create v0.1.5 \
+              dist/EZ-Music-v0.1.5-Windows-Clean.zip \
+              dist/SHA256SUMS.txt \
+              --target 8cb0969d4089bb4a26072b27782b4bb8bf7c5c6a \
+              --title "EZ Music v0.1.5" \
+              --notes "Playback stability and shared silent Now Playing release. Lavalink buffering headroom is increased from 1s/10s to 2s/20s without enabling DSP or increasing the 256 MB JVM cap. /status now merges live Shoukaku/Lavalink WebSocket frame counters (sent, nulled, deficit) and CPU telemetry so micro-stutter/frame starvation is visible instead of being hidden behind source-health status. /nowplaying is now the only public slash-command response and uses Discord Suppress Notifications; Queue, More, personal Favorite feedback, status, search UI, errors, confirmations, history, favorites and all other detailed interfaces remain private. Public and private live-panel leases are isolated so private menus cannot overwrite the shared JukeBox. YTM-first search, normal YouTube fallback, Spotify mirroring, raw audio policy, queue/race/recovery protections and the current YouTube playback-fix snapshot are unchanged. PR #7 and post-merge main CI passed on Windows/Ubuntu plus the standalone Lavalink + YouTube/LavaSrc smoke test."
+          fi
+
+      - name: Remove merged feature branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin --delete feat/v015-stability-public-nowplaying || true
