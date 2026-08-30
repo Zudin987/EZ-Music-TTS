@@ -36,9 +36,11 @@ Run:
 
 The response is visible only to you. It shows artwork, title, artist, duration, requester, Up Next, saved volume, loop, autoplay, and upcoming count.
 
-Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · Refresh
+Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · More · Refresh
 
-`Refresh` updates your private snapshot after another command or a track change.
+`Queue` opens a private Queue Manager with 25-track pages, a track selector, Remove, Move Next, Play Now, duplicate cleanup, and refresh/back controls. No extra public slash commands are added.
+
+`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek). The progress bar is a static snapshot and updates only when the private panel is refreshed, so there is no background message-update timer.
 
 The Discord voice-channel status is also updated to:
 
@@ -158,21 +160,31 @@ For hidden mode, the stop script first requests a graceful Node/Discord/SQLite s
 Lavalink uses a single-server stability buffer profile:
 
 ```yaml
+nonAllocatingFrameBuffer: true
 bufferDurationMs: 1000
 frameBufferDurationMs: 10000
+youtubePlaylistLoadLimit: 3
 ```
 
 These are buffering controls, not audio effects. They do not alter pitch, speed, EQ, or the source recording. The extra headroom is intended to absorb short source/network/GC hiccups, especially near track startup.
 
-The Java launcher uses:
+The low-memory launcher uses:
 
 ```text
--Xms128M -Xmx512M
+Lavalink: -Xms64M -Xmx256M
+Node: --max-old-space-size=128
 ```
 
-The 512 MB value is a maximum Java heap cap, not guaranteed constant RAM use.
+Lavalink also enables `nonAllocatingFrameBuffer: true`, disables routine REST request logging, and limits YouTube playlist loading to 3 pages. The bot separately caps the live upcoming queue at **300 tracks** and a single playlist request at **250 tracks**. These controls are intended to keep the single-server stack comfortably lean; JVM heap limits are not identical to total Windows process working-set RAM.
 
 ---
+
+## Lightweight reliability features
+
+- **Queue ceiling:** maximum 300 upcoming tracks; a single playlist adds at most 250.
+- **Empty-room auto-leave:** if no human listener remains in the bot voice channel for 2 minutes, the player disconnects and frees resources.
+- **Source circuit breaker:** three early playback/resolve failures inside 60 seconds pause automatic queue consumption, disable autoplay/loop, preserve remaining upcoming tracks in memory, and retry once after a cooldown instead of burning through the whole queue. A stable track for 20 seconds resets the failure window.
+- **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.
 
 # Music sources
 
@@ -199,6 +211,9 @@ The built-in Lavalink YouTube source is disabled. Generic arbitrary HTTP-source 
 - player state
 - current song
 - Up Next count and loop mode
+- Node RSS / heap usage
+- Lavalink JVM memory stats
+- playback-source health / preserved-queue protection state
 
 This avoids treating gateway ping as if it were the actual audio/voice latency.
 
