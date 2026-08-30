@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { createLivePanelRegistry } from './live-panel.js';
 import { MessageFlags, REST, Routes, SlashCommandBuilder, escapeMarkdown } from 'discord.js';
 import {
   addFavorite,
@@ -319,6 +320,7 @@ function helpText() {
     '`/help` `/ping` `/status`',
     '',
     'All replies and player/queue controls are private, so the music text channel stays empty.',
+    'The player auto-refreshes about every 10 seconds for up to ~14 minutes; Refresh or Back starts a fresh live window.',
     'Queue Manager: select tracks, Remove / Move Next / Play Now / Dedupe, with a 5-minute Undo for clear/remove/dedupe.',
     'More: seek/replay plus Favorites and Recent History. `/play select:true` privately lets you choose an exact search result.',
     '`/status` offers Resume/Discard when a recent crash/restart session is recoverable.',
@@ -358,7 +360,42 @@ export function createInteractionHandler({
 
   const canUndo = (guildId) => Boolean(getUndoSnapshot(guildId));
   const panelPayload = (player, guildId, notice = null) => playerPanelPayload(player, getGuildAutoplay(guildId), notice, { canUndo: canUndo(guildId) });
-  const queuePayload = (player, guildId, page = 0, selectedIndex = null, notice = null) => queueManagerPayload(player, page, selectedIndex, notice, { canUndo: canUndo(guildId) });
+const queuePayload = (player, guildId, page = 0, selectedIndex = null, notice = null) => queueManagerPayload(player, page, selectedIndex, notice, { canUndo: canUndo(guildId) });
+
+const livePanels = createLivePanelRegistry({
+  render: async (sourceInteraction, { retiring }) => {
+    const currentPlayer = music.players.get(sourceInteraction.guildId);
+    if (!currentPlayer?.queue?.current) {
+      return {
+        payload: panelPayload(
+          currentPlayer,
+          sourceInteraction.guildId,
+          '⏹️ Playback ended or the bot disconnected. Live refresh stopped.',
+        ),
+        stopAfter: true,
+      };
+    }
+    return {
+      payload: panelPayload(
+        currentPlayer,
+        sourceInteraction.guildId,
+        retiring ? '⏱️ Live refresh ended after about 14 minutes. Press Refresh to resume live updates.' : null,
+      ),
+    };
+  },
+  onError: (error) => {
+    const code = Number(error?.code || 0);
+    if (![10015, 10062, 50027].includes(code)) console.warn('[live-panel]', error?.message || error);
+  },
+});
+
+async function editLivePanel(interaction, player, notice = null) {
+  const currentPlayer = music.players.get(interaction.guildId) || player;
+  const result = await interaction.editReply(panelPayload(currentPlayer, interaction.guildId, notice));
+  if (currentPlayer?.queue?.current) livePanels.track(interaction);
+  else livePanels.pause(interaction);
+  return result;
+}
 
   function getHistoryPayload(guildId, page = 0, selectedId = null, notice = null) {
     const total = countHistory(guildId);
@@ -435,7 +472,7 @@ export function createInteractionHandler({
     music, gemini, ensurePlayer, queueTracks, queueLimit, setGuildAutoplay, getGuildAutoplay, setGuildVolume,
     invalidateQueueWork, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession,
     withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,
-    queueLibraryRow, restoreUndo,
+    queueLibraryRow, restoreUndo, livePanels, editLivePanel,
   };
 
   return async function handle(interaction) {
@@ -595,7 +632,9 @@ export function createInteractionHandler({
       if (name === 'nowplaying') {
         requireSameVoice(interaction, player);
         requireCurrentTrack(player);
-        return privateReply(interaction, null, panelPayload(player, interaction.guildId));
+        await privateReply(interaction, null, panelPayload(player, interaction.guildId));
+        livePanels.track(interaction);
+        return;
       }
       requireSameVoice(interaction, player);
 
@@ -722,11 +761,15 @@ async function handleButton(interaction, api) {
     music, gemini, ensurePlayer, queueTracks, queueLimit, setGuildAutoplay, getGuildAutoplay, setGuildVolume,
     invalidateQueueWork, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession,
     withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,
-    queueLibraryRow, restoreUndo,
+    queueLibraryRow, restoreUndo, livePanels, editLivePanel,
   } = api;
   const queueControls = { setGuildAutoplay, invalidateQueueWork, discardHeldQueue };
   const parts = interaction.customId.split(':');
   const action = parts[1];
+
+  // Stop the previous auto-refresh lease before handling any button. Views that
+  // render the player again acquire a fresh ~14-minute interaction-token lease.
+  livePanels.pause(interaction);
 
   // Library/status/recovery controls work even while the bot is disconnected.
   if (action === 'history') {
@@ -770,7 +813,7 @@ async function handleButton(interaction, api) {
     await interaction.deferUpdate();
     const result = await resumeRecoverySession(interaction, session);
     const background = result.restoring ? ` Restoring up to **${result.restoring}** additional saved track(s) in the background.` : '';
-    return interaction.editReply(panelPayload(music.players.get(interaction.guildId), interaction.guildId, `✅ Resumed **${safeTitle(result.current, 90)}** near the saved position.${background}`));
+    return editLivePanel(interaction, music.players.get(interaction.guildId), `✅ Resumed **${safeTitle(result.current, 90)}** near the saved position.${background}`);
   }
 
   if (action.startsWith('h') && ['hplay', 'hnext', 'hfavorite'].includes(action)) {
@@ -810,8 +853,8 @@ async function handleButton(interaction, api) {
   // Read-only player navigation does not require joining voice.
   if (action === 'queue') { await interaction.deferUpdate(); return interaction.editReply(queuePayload(player, interaction.guildId, 0)); }
   if (action === 'qpage' || action === 'qrefresh') { await interaction.deferUpdate(); return interaction.editReply(queuePayload(player, interaction.guildId, Number.parseInt(parts[2], 10) || 0)); }
-  if (action === 'qback' || action === 'back') { await interaction.deferUpdate(); return interaction.editReply(panelPayload(player, interaction.guildId)); }
-  if (action === 'refresh') { await interaction.deferUpdate(); return interaction.editReply(panelPayload(player, interaction.guildId)); }
+  if (action === 'qback' || action === 'back') { await interaction.deferUpdate(); return editLivePanel(interaction, player); }
+  if (action === 'refresh') { await interaction.deferUpdate(); return editLivePanel(interaction, player); }
   if (action === 'more_refresh') { await interaction.deferUpdate(); return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId))); }
   if (action === 'favorite') {
     requireCurrentTrack(player);
@@ -821,7 +864,7 @@ async function handleButton(interaction, api) {
     }
     const added = toggleFavorite(interaction.guildId, interaction.user.id, player.queue.current);
     await interaction.deferUpdate();
-    return interaction.editReply(panelPayload(player, interaction.guildId, `${added ? '❤️ Added to' : '💔 Removed from'} your favorites.`));
+    return editLivePanel(interaction, player, `${added ? '❤️ Added to' : '💔 Removed from'} your favorites.`);
   }
 
   requireSameVoice(interaction, player);
@@ -831,7 +874,7 @@ async function handleButton(interaction, api) {
   if (action === 'undo') {
     await interaction.deferUpdate();
     const restored = await restoreUndo(interaction, player);
-    return interaction.editReply(panelPayload(player, interaction.guildId, `↩️ Restored **${restored} track${restored === 1 ? '' : 's'}** from the last queue change.`));
+    return editLivePanel(interaction, player, `↩️ Restored **${restored} track${restored === 1 ? '' : 's'}** from the last queue change.`);
   }
 
   if (action === 'qdedupe') {
@@ -869,7 +912,7 @@ async function handleButton(interaction, api) {
       const [track] = player.queue.splice(index, 1);
       await player.play(track);
       checkpointRecovery(player);
-      return interaction.editReply(panelPayload(player, interaction.guildId, `▶️ Playing **${safeTitle(track, 80)}** now. The interrupted song was moved to the front of the queue.`));
+      return editLivePanel(interaction, player, `▶️ Playing **${safeTitle(track, 80)}** now. The interrupted song was moved to the front of the queue.`);
     });
   }
 
@@ -911,7 +954,7 @@ async function handleButton(interaction, api) {
       clearUndoSnapshot(interaction.guildId);
       const removed = await stopAndResetPlayer(player, interaction.guildId, queueControls);
       clearRecoverySession(interaction.guildId);
-      return interaction.editReply(panelPayload(player, interaction.guildId, `⏹️ Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`));
+      return editLivePanel(interaction, player, `⏹️ Stopped and reset. Cleared ${removed} upcoming/preserved track${removed === 1 ? '' : 's'}.`);
     } else if (action === 'loop') {
       const next = player.loop === 'none' ? 'track' : player.loop === 'track' ? 'queue' : 'none';
       player.setLoop(next);
@@ -932,6 +975,6 @@ async function handleButton(interaction, api) {
     }
     checkpointRecovery(player);
     if (settle) await new Promise((resolve) => setTimeout(resolve, 350));
-    return interaction.editReply(panelPayload(player, interaction.guildId, notice));
+    return editLivePanel(interaction, player, notice);
   });
 }
