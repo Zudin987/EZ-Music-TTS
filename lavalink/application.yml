@@ -35,6 +35,13 @@ lavalink:
       channelMix: false
       lowPass: false
 
+    # Stability profile for a single private bot. These are buffering controls,
+    # not DSP/audio effects: they do not alter pitch, speed, EQ, or the source.
+    # More headroom helps absorb short source/network/GC hiccups at track start.
+    bufferDurationMs: 1000
+    frameBufferDurationMs: 10000
+    trackStuckThresholdMs: 10000
+
 plugins:
   youtube:
     enabled: true
