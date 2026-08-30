@@ -1,0 +1,120 @@
+name: Publish EZ Music v0.1.4
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: b736b5332e07b9ba7ac8e0276647f46eef4f1171
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./package.json').version")" = "0.1.4"
+          test -f src/source-routing.js
+          grep -q "SPOTIFY_TYPES" src/source-routing.js
+          grep -q "track', 'album', 'playlist" src/source-routing.js
+          grep -q "lavasrc-plugin:4.8.3" lavalink/application.yml
+          grep -q "ytmsearch" src/source-routing.js
+          test -f test/source-routing.test.js
+          grep -q "unsupported or malformed Spotify objects" test/source-routing.test.js
+
+      - name: Build clean Windows install ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.4"
+          ROOT="dist/EZ-Music"
+          mkdir -p "$ROOT/src" "$ROOT/lavalink"
+
+          cp README.md package.json .env.example setup.bat start-bot.bat start-hidden.vbs stop-bot.bat install-autostart.bat install-autostart.ps1 remove-autostart.bat "$ROOT/"
+          cp src/*.js "$ROOT/src/"
+          cp lavalink/application.yml "$ROOT/lavalink/"
+
+          cat > "$ROOT/CLEAN-INSTALL.txt" <<'EOF'
+          EZ MUSIC v0.1.4 CLEAN WINDOWS INSTALL
+          ====================================
+          1. Stop EZ Music.
+          2. Back up C:\EZ-Music\.env.
+          3. If you want to preserve volume, favorites, history and crash/restart recovery,
+             also back up C:\EZ-Music\data\ez-music.sqlite.
+          4. Remove or rename the old C:\EZ-Music folder for a truly clean install.
+          5. Extract this ZIP so the app lives at C:\EZ-Music.
+          6. Restore your backed-up .env to C:\EZ-Music\.env.
+          7. Restore data\ez-music.sqlite only if you intentionally backed it up.
+          8. Run setup.bat.
+          9. Test with start-bot.bat.
+          10. When satisfied, use start-hidden.vbs; reinstall Task Scheduler only if needed.
+
+          SEARCH ROUTING
+          --------------
+          Plain text /play and /playnext search YouTube Music first. If YouTube Music
+          returns no usable result or errors, EZ Music falls back once to normal YouTube.
+          Direct URLs and explicit search prefixes remain exact and are never rewritten.
+
+          OPTIONAL SPOTIFY URL MIRRORING
+          ------------------------------
+          Spotify is metadata/mirroring only; audio is still resolved through YouTube
+          Music / YouTube. EZ Music accepts full Spotify track, album and playlist
+          references only. Unsupported artist/episode/show/malformed objects are rejected
+          before Lavalink, and spotify.link short URLs remain intentionally rejected.
+
+          To enable supported Spotify URLs, add these to .env:
+
+              SPOTIFY_CLIENT_ID=...
+              SPOTIFY_CLIENT_SECRET=...
+              SPOTIFY_COUNTRY_CODE=MY
+
+          Then restart EZ Music so Lavalink restarts with those settings. Leave both
+          credential fields blank if you do not want Spotify support. Spotify's current
+          Development Mode requires the developer-app owner to have Spotify Premium.
+
+          This package intentionally contains no .env, real secrets, SQLite database,
+          node_modules, logs, or Lavalink.jar. setup.bat installs/downloads required
+          runtime files. No DSP/audio filters, Docker, WSL, generic HTTP source, or
+          local-file source were enabled by this update.
+          EOF
+
+          cd dist
+          zip -r -9 "EZ-Music-${VERSION}-Windows-Clean.zip" EZ-Music >/dev/null
+          sha256sum "EZ-Music-${VERSION}-Windows-Clean.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.4 >/dev/null 2>&1; then
+            echo "Release v0.1.4 already exists; leaving it unchanged."
+          else
+            gh release create v0.1.4 \
+              dist/EZ-Music-v0.1.4-Windows-Clean.zip \
+              dist/SHA256SUMS.txt \
+              --target b736b5332e07b9ba7ac8e0276647f46eef4f1171 \
+              --title "EZ Music v0.1.4" \
+              --notes "Spotify routing validation hardening release. EZ Music keeps the v0.1.3 YouTube Music-first search with normal YouTube fallback and optional LavaSrc 4.8.3 Spotify metadata mirroring, but now strictly accepts only Spotify track, album, and playlist references. Artist, episode, show, malformed Spotify paths/URIs, and unsupported spotify.link short URLs are rejected cleanly before Lavalink. Source routing was extracted into a directly testable helper with behavioral regression coverage for YTM-first success, one-step YouTube fallback, direct URL/prefix passthrough, Spotify credential gating, valid track/album/playlist recognition, and invalid-object rejection. No new service, Node dependency, DSP/filter, generic HTTP source, local-file source, Docker, WSL, or higher RAM limit was added. PR #6 CI and the post-merge main CI both passed on Windows/Ubuntu plus the standalone Lavalink 4.2.2 + YouTube/LavaSrc YTM/YouTube smoke test."
+          fi
+
+      - name: Remove merged feature branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin --delete fix/spotify-routing-validation-v014 || true
