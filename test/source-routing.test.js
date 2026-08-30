@@ -32,6 +32,7 @@ test('Spotify is optional, credential-gated, and mirrored YTM before YouTube', (
   const ytProvider = lavalink.indexOf("ytsearch:%QUERY%");
   assert.ok(ytmProvider >= 0 && ytProvider > ytmProvider, 'Spotify mirroring must prefer YTM before YouTube');
   assert.match(music, /Spotify URL support is not configured/);
+  assert.match(music, /Spotify short links \(spotify\.link\) are not supported/);
 });
 
 test('launcher passes Spotify secrets via child environment, not Java arguments', () => {

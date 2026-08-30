@@ -82,7 +82,17 @@ export function createMusic(client, config, gemini) {
     try {
       const url = new URL(text);
       const host = url.hostname.toLowerCase();
-      return host === 'open.spotify.com' || host.endsWith('.open.spotify.com') || host === 'spotify.link' || host.endsWith('.spotify.link');
+      return host === 'open.spotify.com' || host.endsWith('.open.spotify.com');
+    } catch {
+      return false;
+    }
+  }
+
+  function isSpotifyShortLink(value) {
+    try {
+      const url = new URL(String(value || '').trim());
+      const host = url.hostname.toLowerCase();
+      return host === 'spotify.link' || host.endsWith('.spotify.link');
     } catch {
       return false;
     }
@@ -95,6 +105,10 @@ export function createMusic(client, config, gemini) {
   async function searchPreferred(target, query, requester) {
     const clean = String(query || '').trim();
     if (!clean) throw new Error('Search query is empty.');
+
+    if (isSpotifyShortLink(clean)) {
+      throw new Error('Spotify short links (spotify.link) are not supported by the current LavaSrc source. Open the link in Spotify and paste the full open.spotify.com URL instead.');
+    }
 
     if (isSpotifyReference(clean)) {
       if (!spotifyConfigured) {
