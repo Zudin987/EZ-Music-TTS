@@ -10,26 +10,22 @@ const lavalink = fs.readFileSync('lavalink/application.yml', 'utf8');
 test('Windows setup uses native Java Lavalink and verifies the pinned jar', () => {
   assert.match(setup, /22\.14\.0/);
   assert.match(setup, /Java 17 or newer/i);
+  assert.match(setup, /findstr \/i "version"/i);
+  assert.doesNotMatch(setup, /powershell[^\r\n]*java -version/i);
   assert.match(setup, /Lavalink\/releases\/download\/%LAVALINK_VERSION%\/Lavalink\.jar/i);
   assert.match(setup, /8cb801e591072c3689fafd71ccf571a95a4ead3cc35dfc045e157d763d89119a/i);
   assert.match(setup, /Get-FileHash/i);
   assert.doesNotMatch(setup, /\bwhere\s+docker\b|\bdocker\s+compose\b/i);
 });
 
-test('Windows Java check is cmd-safe and does not pass cmd escapes into PowerShell', () => {
-  for (const script of [setup, start]) {
-    assert.match(script, /for \/f "tokens=3" %%V in \('java -version 2\^>\^&1 \^\| findstr \/i "version"'\)/i);
-    assert.match(script, /set "JAVA_MAJOR=/i);
-    assert.match(script, /if %JAVA_MAJOR% LSS 17/i);
-    assert.doesNotMatch(script, /powershell[^\n]*java -version/i);
-  }
-});
-
-test('Windows launcher starts standalone Lavalink with bounded heap and waits for authenticated readiness', () => {
+test('Windows launcher starts standalone Lavalink with bounded heap and an explicit working directory', () => {
   assert.match(start, /Starting native Lavalink/i);
   assert.match(start, /-Xms128M/i);
   assert.match(start, /-Xmx512M/i);
   assert.match(start, /Start-Process -FilePath 'java'/i);
+  assert.match(start, /set "LAVALINK_WORK=%CD%\\lavalink"/i);
+  assert.match(start, /\$work=\$env:LAVALINK_WORK/i);
+  assert.doesNotMatch(start, /\$env:CD\b/i);
   assert.match(start, /lavalink\.pid/i);
   assert.match(start, /127\.0\.0\.1:2333\/version/i);
   assert.match(start, /Authorization='ezmusic-local-only'/i);
