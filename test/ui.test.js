@@ -9,8 +9,15 @@ function fakeTrack(index, title = `Track ${index}`) {
 function fakePlayer(count = 3) {
   const queue = Array.from({ length: count }, (_, index) => fakeTrack(index + 1));
   queue.current = fakeTrack(0, 'Current');
+  queue.previous = [fakeTrack(-1, 'Previous track')];
   Object.defineProperty(queue, 'durationLength', { get: () => queue.reduce((sum, track) => sum + track.length, 0) });
-  return { queue, paused: false, loop: 'none', volume: 80 };
+  return {
+    queue,
+    paused: false,
+    loop: 'none',
+    volume: 80,
+    getPrevious: () => queue.previous[0],
+  };
 }
 
 test('player panel exposes only approved controls', () => {
@@ -19,7 +26,7 @@ test('player panel exposes only approved controls', () => {
     .map((component) => component.data.label);
   assert.deepEqual(labels, [
     'Previous', 'Loop: Off', 'Pause', 'Shuffle', 'Skip',
-    'Queue', 'Clear', 'Stop', 'Autoplay: On', 'Vol -', 'Vol +',
+    'Queue (3)', 'Clear', 'Stop', 'Autoplay: On', 'Vol -', 'Vol +', 'Refresh',
   ]);
   assert.equal(labels.some((label) => /filter|karaoke|8d|nightcore|eq/i.test(label)), false);
 });
