@@ -33,7 +33,7 @@ test('shutdown coordinator runs cleanup once and every caller waits for the same
 
 test('stale picker guard is evaluated before ensurePlayer can reconnect', () => {
   const commands = fs.readFileSync('src/commands.js', 'utf8');
-  const handler = commands.match(/async function handleSearchSelect[\s\S]*?\n}\n/)?.[0] || '';
+  const handler = commands.match(/async function handleSearchSelect[\s\S]*?\r?\n}\r?\n/)?.[0] || '';
   const staleCheck = handler.indexOf('isQueueRevisionCurrent(interaction.guildId, entry.revision)');
   const ensure = handler.indexOf('await ensurePlayer(interaction)');
   assert.ok(staleCheck >= 0 && ensure >= 0 && staleCheck < ensure);
