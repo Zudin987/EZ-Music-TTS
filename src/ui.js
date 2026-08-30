@@ -28,23 +28,30 @@ function safeHttpUrl(value) {
 
 export function playerButtons(player, autoplayMode = 'off') {
   const paused = Boolean(player?.paused);
+  const hasCurrent = Boolean(player?.queue?.current);
+  const upcoming = Number(player?.queue?.length || 0);
+  const hasPrevious = Boolean(player?.getPrevious?.(false));
+  const volume = Math.round(Number(player?.volume || 0));
+  const clearHasEffect = upcoming > 0 || player?.loop !== 'none' || autoplayMode !== 'off';
+
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('music:previous').setLabel('Previous').setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:previous').setLabel('Previous').setEmoji('⏮️').setStyle(ButtonStyle.Secondary).setDisabled(!hasPrevious),
       new ButtonBuilder().setCustomId('music:loop').setLabel(`Loop: ${prettyLoop(player?.loop)}`).setEmoji('🔁').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(paused ? 'music:resume' : 'music:pause').setLabel(paused ? 'Resume' : 'Pause').setEmoji(paused ? '▶️' : '⏸️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('music:shuffle').setLabel('Shuffle').setEmoji('🔀').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('music:skip').setLabel('Skip').setEmoji('⏭️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(paused ? 'music:resume' : 'music:pause').setLabel(paused ? 'Resume' : 'Pause').setEmoji(paused ? '▶️' : '⏸️').setStyle(ButtonStyle.Primary).setDisabled(!hasCurrent),
+      new ButtonBuilder().setCustomId('music:shuffle').setLabel('Shuffle').setEmoji('🔀').setStyle(ButtonStyle.Secondary).setDisabled(upcoming < 2),
+      new ButtonBuilder().setCustomId('music:skip').setLabel('Skip').setEmoji('⏭️').setStyle(ButtonStyle.Secondary).setDisabled(!hasCurrent),
     ),
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('music:queue').setLabel('Queue').setEmoji('📜').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('music:clear').setLabel('Clear').setEmoji('🧹').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('music:stop').setLabel('Stop').setEmoji('⏹️').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('music:queue').setLabel(`Queue (${upcoming})`).setEmoji('📜').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:clear').setLabel('Clear').setEmoji('🧹').setStyle(ButtonStyle.Secondary).setDisabled(!clearHasEffect),
+      new ButtonBuilder().setCustomId('music:stop').setLabel('Stop').setEmoji('⏹️').setStyle(ButtonStyle.Danger).setDisabled(!hasCurrent && upcoming === 0),
       new ButtonBuilder().setCustomId('music:autoplay').setLabel(`Autoplay: ${prettyAutoplay(autoplayMode)}`).setEmoji('🔄').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('music:volume_down').setLabel('Vol -').setEmoji('🔉').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('music:volume_up').setLabel('Vol +').setEmoji('🔊').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('music:volume_down').setLabel('Vol -').setEmoji('🔉').setStyle(ButtonStyle.Secondary).setDisabled(volume <= 0),
+      new ButtonBuilder().setCustomId('music:volume_up').setLabel('Vol +').setEmoji('🔊').setStyle(ButtonStyle.Secondary).setDisabled(volume >= 100),
+      new ButtonBuilder().setCustomId('music:refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -66,7 +73,7 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
       { name: '👤 Requester', value: safeText(requester, 100), inline: true },
     )
     .setFooter({
-      text: `Volume: ${Math.round(player?.volume ?? 0)}% | Loop: ${prettyLoop(player?.loop)} | Autoplay: ${prettyAutoplay(autoplayMode)} | Queue: ${queueCount}${queueDuration > 0 ? ` (${formatDuration(queueDuration)})` : ''}`,
+      text: `Volume: ${Math.round(player?.volume ?? 0)}% | Loop: ${prettyLoop(player?.loop)} | Autoplay: ${prettyAutoplay(autoplayMode)} | Up next: ${queueCount}${queueDuration > 0 ? ` (${formatDuration(queueDuration)})` : ''}`,
     });
 
   if (uri) embed.setURL(uri);
@@ -78,9 +85,11 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
 
 export function queueText(player, max = 20, maxChars = 1850) {
   const current = player?.queue?.current;
+  const totalUpcoming = Number(player?.queue?.length || 0);
   const upcoming = [...(player?.queue || [])].slice(0, max);
   const lines = [];
   if (current) lines.push(`**Now:** ${safeText(current.title, 70)} — ${safeText(current.author, 35)}`);
+  lines.push(totalUpcoming > 0 ? `**Up next (${totalUpcoming}):**` : '**Up next:** Nothing queued.');
 
   let shown = 0;
   for (let index = 0; index < upcoming.length; index += 1) {
@@ -92,8 +101,7 @@ export function queueText(player, max = 20, maxChars = 1850) {
     shown += 1;
   }
 
-  const hidden = Math.max(0, Number(player?.queue?.length || 0) - shown);
+  const hidden = Math.max(0, totalUpcoming - shown);
   if (hidden > 0) lines.push(`…and ${hidden} more`);
-  const text = lines.join('\n') || 'Queue is empty.';
-  return truncate(text, maxChars);
+  return truncate(lines.join('\n'), maxChars);
 }
