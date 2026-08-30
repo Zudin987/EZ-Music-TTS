@@ -14,8 +14,8 @@ where node >nul 2>nul || (
   exit /b 1
 )
 
-node -e "const [M,m]=process.versions.node.split('.').map(Number);process.exit(M>22||(M===22&&m>=9)?0:1)" || (
-  for /f "delims=" %%V in ('node -p "process.versions.node"') do echo [ERROR] Node.js %%V is too old. Version 22.9.0 or newer is required.
+node -e "const [M,m]=process.versions.node.split('.').map(Number);process.exit(M>22||(M===22&&m>=14)?0:1)" || (
+  for /f "delims=" %%V in ('node -p "process.versions.node"') do echo [ERROR] Node.js %%V is too old. Version 22.14.0 or newer is required.
   pause
   exit /b 1
 )
