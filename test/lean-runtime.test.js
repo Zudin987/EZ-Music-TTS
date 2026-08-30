@@ -19,8 +19,8 @@ test('Lavalink allocation/log/playlist controls stay lean without DSP', () => {
   assert.match(lavalink, /nonAllocatingFrameBuffer:\s*true/);
   assert.match(lavalink, /youtubePlaylistLoadLimit:\s*3/);
   assert.match(lavalink, /request:\s*\r?\n\s*enabled:\s*false/);
-  assert.match(lavalink, /bufferDurationMs:\s*1000/);
-  assert.match(lavalink, /frameBufferDurationMs:\s*10000/);
+  assert.match(lavalink, /bufferDurationMs:\s*2000/);
+  assert.match(lavalink, /frameBufferDurationMs:\s*20000/);
   for (const filter of ['equalizer', 'karaoke', 'timescale', 'tremolo', 'vibrato', 'distortion', 'rotation', 'channelMix', 'lowPass']) {
     assert.match(lavalink, new RegExp(`${filter}:\\s*false`, 'i'));
   }

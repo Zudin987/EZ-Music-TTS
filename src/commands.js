@@ -26,6 +26,7 @@ import {
 import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
+const PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications;
 const MAX_PLAYLIST_ADD = 250;
 const SEARCH_PICKER_TTL_MS = 120_000;
 const UNDO_TTL_MS = 5 * 60_000;
@@ -77,6 +78,20 @@ function privateReply(interaction, content, extra = {}) {
 
 function privateDefer(interaction) {
   return interaction.deferReply({ flags: PRIVATE_FLAGS });
+}
+
+function publicNowPlayingReply(interaction, payload = {}) {
+  return interaction.reply({
+    ...payload,
+    flags: Number(payload.flags || 0) | PUBLIC_NOWPLAYING_FLAGS,
+  });
+}
+
+function isPublicComponentInteraction(interaction) {
+  if (!interaction?.isMessageComponent?.()) return false;
+  const flags = interaction?.message?.flags;
+  if (typeof flags?.has === 'function') return !flags.has(MessageFlags.Ephemeral);
+  return (Number(flags?.bitfield ?? flags ?? 0) & MessageFlags.Ephemeral) === 0;
 }
 
 function playerPanelPayload(player, autoplayMode, notice = null, { canUndo = false } = {}) {
@@ -227,6 +242,26 @@ function sourceHealthLine(health) {
   return `Playback source: **⚠️ ${label}**${held ? ` • ${held} track${held === 1 ? '' : 's'} preserved` : ''}${retrySeconds ? ` • retry in ~${retrySeconds}s` : ''}`;
 }
 
+function audioStreamLines(runtime, connected) {
+  if (!connected) return [];
+  const frames = runtime?.lavalink?.frameStats;
+  if (!frames) return ['Audio stream: **Measuring / frame stats unavailable**'];
+  const sent = Math.max(0, Number(frames.sent || 0));
+  const nulled = Math.max(0, Number(frames.nulled || 0));
+  const deficit = Number(frames.deficit || 0);
+  const starving = nulled > 0 || deficit > 0;
+  const signedDeficit = `${deficit > 0 ? '+' : ''}${deficit}`;
+  return [
+    `Audio stream: **${starving ? '⚠️ Frame starvation detected' : 'Smooth'}**`,
+    `Audio frames: **${sent} sent** • ${nulled} nulled • ${signedDeficit} deficit`,
+  ];
+}
+
+function percent(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${(Math.max(0, n) * 100).toFixed(1)}%` : 'n/a';
+}
+
 function dedupeUpcoming(player) {
   const seen = new Set();
   const currentKey = trackKey(player?.queue?.current);
@@ -319,7 +354,7 @@ function helpText() {
     '`/ai request:<text>` `/ai autoplay:on|off`',
     '`/help` `/ping` `/status`',
     '',
-    'All replies and player/queue controls are private, so the music text channel stays empty.',
+    '`/nowplaying` is the only public response and is sent with Discord silent-notification flags; all commands, detailed menus, confirmations, and errors stay private.',
     'The player auto-refreshes about every 10 seconds for up to ~14 minutes; Refresh or Back starts a fresh live window.',
     'Queue Manager: select tracks, Remove / Move Next / Play Now / Dedupe, with a 5-minute Undo for clear/remove/dedupe.',
     'More: seek/replay plus Favorites and Recent History. `/play select:true` privately lets you choose an exact search result.',
@@ -517,6 +552,7 @@ async function editLivePanel(interaction, player, notice = null) {
         if (player) {
           const voicePing = Number(player.shoukaku?.ping ?? 0);
           lines.push(`Voice transport: **${voicePing > 0 ? `${Math.round(voicePing)} ms` : 'connected / measuring'}**`);
+          lines.push(...audioStreamLines(runtime, true));
           if (player.queue.current) lines.push(`Current: **${safeTitle(player.queue.current, 100)}**`);
           lines.push(`Up next: **${player.queue.length}/${queueLimit}** | Loop: **${player.loop || 'none'}**`);
         } else {
@@ -528,6 +564,8 @@ async function editLivePanel(interaction, player, notice = null) {
         if (nodeMemory) lines.push(`Node RAM: **${mb(nodeMemory.rss)} RSS** • heap ${mb(nodeMemory.heapUsed)}/${mb(nodeMemory.heapTotal)}`);
         const llMemory = runtime?.lavalink?.memory;
         if (llMemory) lines.push(`Lavalink JVM: **${mb(llMemory.used)} used** • max ${mb(llMemory.reservable)}`);
+        const llCpu = runtime?.lavalink?.cpu;
+        if (llCpu) lines.push(`Lavalink CPU: **${percent(llCpu.lavalinkLoad)}** • system ${percent(llCpu.systemLoad)}`);
         lines.push('RAM note: JVM figures are Lavalink runtime memory, not the Java process\'s complete Windows working set.');
         return privateReply(interaction, lines.join('\n'), { components: statusButtons({ hasRecovery: Boolean(recovery) }) });
       }
@@ -636,7 +674,7 @@ async function editLivePanel(interaction, player, notice = null) {
       if (name === 'nowplaying') {
         requireSameVoice(interaction, player);
         requireCurrentTrack(player);
-        await privateReply(interaction, null, panelPayload(player, interaction.guildId));
+        await publicNowPlayingReply(interaction, panelPayload(player, interaction.guildId));
         livePanels.track(interaction);
         return;
       }
@@ -771,9 +809,11 @@ async function handleButton(interaction, api) {
   const parts = interaction.customId.split(':');
   const action = parts[1];
 
-  // Stop the previous auto-refresh lease before handling any button. Views that
-  // render the player again acquire a fresh ~14-minute interaction-token lease.
-  livePanels.pause(interaction);
+  // Private sub-views keep their own per-user refresh lease. A public Now Playing
+  // button must not kill the shared public lease merely because it opens a
+  // private Queue/More view. Direct public controls can renew the public lease.
+  const publicSource = isPublicComponentInteraction(interaction);
+  if (!publicSource) livePanels.pause(interaction);
 
   // Library/status/recovery controls work even while the bot is disconnected.
   if (action === 'history') {
@@ -855,7 +895,11 @@ async function handleButton(interaction, api) {
   const player = getPlayer(music, interaction.guildId);
 
   // Read-only player navigation does not require joining voice.
-  if (action === 'queue') { await interaction.deferUpdate(); return interaction.editReply(queuePayload(player, interaction.guildId, 0)); }
+  if (action === 'queue') {
+    if (publicSource) return privateReply(interaction, null, queuePayload(player, interaction.guildId, 0));
+    await interaction.deferUpdate();
+    return interaction.editReply(queuePayload(player, interaction.guildId, 0));
+  }
   if (action === 'qpage' || action === 'qrefresh') { await interaction.deferUpdate(); return interaction.editReply(queuePayload(player, interaction.guildId, Number.parseInt(parts[2], 10) || 0)); }
   if (action === 'qback' || action === 'back') { await interaction.deferUpdate(); return editLivePanel(interaction, player); }
   if (action === 'refresh') { await interaction.deferUpdate(); return editLivePanel(interaction, player); }
@@ -867,13 +911,19 @@ async function handleButton(interaction, api) {
       throw expectedError('The song changed since this panel was opened. Refresh the player before favoriting.');
     }
     const added = toggleFavorite(interaction.guildId, interaction.user.id, player.queue.current);
+    if (publicSource) return privateReply(interaction, `${added ? '❤️ Added to' : '💔 Removed from'} your favorites.`);
     await interaction.deferUpdate();
     return editLivePanel(interaction, player, `${added ? '❤️ Added to' : '💔 Removed from'} your favorites.`);
   }
 
   requireSameVoice(interaction, player);
   if (action === 'seekmodal') return interaction.showModal(seekModal());
-  if (action === 'more') { requireCurrentTrack(player); await interaction.deferUpdate(); return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId))); }
+  if (action === 'more') {
+    requireCurrentTrack(player);
+    if (publicSource) return privateReply(interaction, null, playbackToolsPayload(player, getGuildAutoplay(interaction.guildId)));
+    await interaction.deferUpdate();
+    return interaction.editReply(playbackToolsPayload(player, getGuildAutoplay(interaction.guildId)));
+  }
 
   if (action === 'undo') {
     await interaction.deferUpdate();

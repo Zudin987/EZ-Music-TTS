@@ -39,8 +39,8 @@ test('private panel clarifies upcoming count and includes manual refresh', () =>
 });
 
 test('Lavalink stability buffers are larger without enabling DSP', () => {
-  assert.match(lavalink, /bufferDurationMs:\s*1000/);
-  assert.match(lavalink, /frameBufferDurationMs:\s*10000/);
+  assert.match(lavalink, /bufferDurationMs:\s*2000/);
+  assert.match(lavalink, /frameBufferDurationMs:\s*20000/);
   for (const filter of ['equalizer', 'karaoke', 'timescale', 'tremolo', 'vibrato', 'distortion', 'rotation', 'channelMix', 'lowPass']) {
     assert.match(lavalink, new RegExp(`${filter}:\\s*false`, 'i'));
   }

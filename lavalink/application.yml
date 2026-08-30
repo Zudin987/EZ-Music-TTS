@@ -42,8 +42,8 @@ lavalink:
     # not DSP/audio effects: they do not alter pitch, speed, EQ, or the source.
     # More headroom helps absorb short source/network/GC hiccups at track start.
     nonAllocatingFrameBuffer: true
-    bufferDurationMs: 1000
-    frameBufferDurationMs: 10000
+    bufferDurationMs: 2000
+    frameBufferDurationMs: 20000
     trackStuckThresholdMs: 10000
     # 3 pages x ~100 tracks keeps huge YouTube playlists from creating large
     # transient responses on a machine with a strict RAM budget.
