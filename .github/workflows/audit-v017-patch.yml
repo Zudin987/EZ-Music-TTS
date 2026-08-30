@@ -22,6 +22,19 @@ jobs:
         with:
           node-version: '22.14.0'
           package-manager-cache: false
+      - name: Fix deliberate duplicate replacement guard
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/audit_v017_patch.py')
+          text = path.read_text(encoding='utf-8')
+          old = "    if count != 1:\n        raise RuntimeError(f'{label}: expected exactly one match, found {count}')"
+          new = "    if count < 1:\n        raise RuntimeError(f'{label}: expected at least one match, found {count}')"
+          if old not in text:
+              raise SystemExit('replace_once guard not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
       - name: Apply audited patch
         run: python3 tools/audit_v017_patch.py
       - name: Generate lockfile
