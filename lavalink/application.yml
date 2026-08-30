@@ -37,9 +37,14 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
+    # MUSIC is search-only. The remaining clients are anonymous playback
+    # fallbacks, ordered to try newer/less restricted clients before WEB.
     clients:
       - MUSIC
+      - TVHTML5_SIMPLY
+      - ANDROID_MUSIC
       - ANDROID_VR
+      - MWEB
       - WEB
       - WEBEMBEDDED
 
