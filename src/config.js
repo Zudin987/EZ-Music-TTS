@@ -21,6 +21,6 @@ export const config = {
   lavalinkSecure: (process.env.LAVALINK_SECURE ?? 'false').toLowerCase() === 'true',
   geminiApiKey: process.env.GEMINI_API_KEY?.trim() || '',
   geminiModel: process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash-lite',
-  defaultVolume: integer('DEFAULT_VOLUME', 80, 1, 100),
+  defaultVolume: integer('DEFAULT_VOLUME', 80, 0, 100),
   autoDisconnectMinutes: integer('AUTO_DISCONNECT_MINUTES', 10, 1, 120),
 };
