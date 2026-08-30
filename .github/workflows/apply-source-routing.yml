@@ -27,7 +27,20 @@ jobs:
           package-manager-cache: false
 
       - name: Apply routing implementation
-        run: python3 .github/apply-source-routing.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/apply-source-routing.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'start, count = pattern.subn(replacement, start, count=1)'
+          new = 'start, count = pattern.subn(lambda match: replacement, start, count=1)'
+          if old not in text:
+              raise SystemExit('staging regex fix anchor missing')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python3 .github/apply-source-routing.py
 
       - name: Validate Node implementation
         run: |
