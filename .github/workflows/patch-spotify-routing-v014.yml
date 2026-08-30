@@ -1,0 +1,345 @@
+name: Patch Spotify routing v0.1.4
+
+on:
+  push:
+    branches:
+      - fix/spotify-routing-validation-v014
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/spotify-routing-validation-v014
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+
+      - name: Apply routing hardening and regression tests
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+          import re
+
+          source_routing = r'''const SPOTIFY_HOST = 'open.spotify.com';
+          const SPOTIFY_SHORT_HOST = 'spotify.link';
+          const SPOTIFY_ID_RE = /^[A-Za-z0-9]{22}$/;
+          const SPOTIFY_TYPES = new Set(['track', 'album', 'playlist']);
+
+          function unsupportedSpotify(message = null) {
+            return {
+              spotify: true,
+              supported: false,
+              short: false,
+              type: null,
+              id: null,
+              error: message || 'Unsupported Spotify reference. EZ Music supports only full open.spotify.com track, album, or playlist URLs (or matching spotify: URIs).',
+            };
+          }
+
+          export function classifySpotifyInput(value) {
+            const text = String(value || '').trim();
+            if (!text) return { spotify: false, supported: false, short: false, type: null, id: null, error: null };
+
+            if (/^spotify:/i.test(text)) {
+              const match = text.match(/^spotify:([a-z]+):([A-Za-z0-9]+)$/i);
+              if (!match) return unsupportedSpotify('Malformed Spotify URI. EZ Music supports spotify:track, spotify:album, and spotify:playlist references with a valid Spotify ID.');
+              const type = match[1].toLowerCase();
+              const id = match[2];
+              if (!SPOTIFY_TYPES.has(type) || !SPOTIFY_ID_RE.test(id)) return unsupportedSpotify();
+              return { spotify: true, supported: true, short: false, type, id, error: null };
+            }
+
+            let url;
+            try {
+              url = new URL(text);
+            } catch {
+              return { spotify: false, supported: false, short: false, type: null, id: null, error: null };
+            }
+
+            const host = url.hostname.toLowerCase();
+            if (host === SPOTIFY_SHORT_HOST) {
+              return {
+                spotify: true,
+                supported: false,
+                short: true,
+                type: null,
+                id: null,
+                error: 'Spotify short links (spotify.link) are not supported by the current LavaSrc source. Open the link in Spotify and paste the full open.spotify.com URL instead.',
+              };
+            }
+            if (host !== SPOTIFY_HOST) return { spotify: false, supported: false, short: false, type: null, id: null, error: null };
+            if (url.protocol !== 'https:') return unsupportedSpotify('Spotify links must use https://open.spotify.com/.');
+
+            const parts = url.pathname.split('/').filter(Boolean);
+            if (parts[0] && /^intl-[a-z]{2,3}$/i.test(parts[0])) parts.shift();
+            if (parts.length !== 2) return unsupportedSpotify();
+
+            const type = String(parts[0] || '').toLowerCase();
+            const id = String(parts[1] || '');
+            if (!SPOTIFY_TYPES.has(type) || !SPOTIFY_ID_RE.test(id)) return unsupportedSpotify();
+            return { spotify: true, supported: true, short: false, type, id, error: null };
+          }
+
+          export function isHttpUrl(value) {
+            try {
+              const url = new URL(String(value || '').trim());
+              return url.protocol === 'http:' || url.protocol === 'https:';
+            } catch {
+              return false;
+            }
+          }
+
+          export function hasExplicitSearchPrefix(value) {
+            return /^(?:ytmsearch|ytsearch|scsearch|spsearch):/i.test(String(value || '').trim());
+          }
+
+          export async function resolvePreferredSearch(target, query, requester, { spotifyConfigured = false } = {}) {
+            const clean = String(query || '').trim();
+            if (!clean) throw new Error('Search query is empty.');
+
+            const spotify = classifySpotifyInput(clean);
+            if (spotify.spotify) {
+              if (!spotify.supported) throw new Error(spotify.error);
+              if (!spotifyConfigured) {
+                throw new Error('Spotify URL support is not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to .env, then restart EZ Music.');
+              }
+              return target.search(clean, { requester });
+            }
+
+            // Never rewrite direct URLs or an explicitly requested search prefix.
+            if (isHttpUrl(clean) || hasExplicitSearchPrefix(clean)) return target.search(clean, { requester });
+
+            let ytmError = null;
+            try {
+              const ytm = await target.search(clean, { requester, source: 'ytmsearch:' });
+              if (ytm?.tracks?.length) return ytm;
+            } catch (error) {
+              ytmError = error;
+            }
+
+            try {
+              return await target.search(clean, { requester, source: 'ytsearch:' });
+            } catch (error) {
+              throw error || ytmError || new Error(`No results for: ${clean}`);
+            }
+          }
+          '''
+          source_routing = '\n'.join(line[10:] if line.startswith('          ') else line for line in source_routing.splitlines()) + '\n'
+          Path('src/source-routing.js').write_text(source_routing, encoding='utf-8')
+
+          music_path = Path('src/music.js')
+          music = music_path.read_text(encoding='utf-8')
+          import_anchor = "import { radioFallbackHistory, trackKey, truncate } from './utils.js';"
+          import_line = "import { resolvePreferredSearch } from './source-routing.js';"
+          if import_line not in music:
+              if import_anchor not in music:
+                  raise SystemExit('music.js import anchor not found')
+              music = music.replace(import_anchor, import_anchor + '\n' + import_line, 1)
+
+          pattern = re.compile(r"  function isHttpUrl\(value\) \{.*?\n  async function withGuildOperation", re.S)
+          replacement = "  const searchPreferred = (target, query, requester) => resolvePreferredSearch(target, query, requester, { spotifyConfigured });\n\n  async function withGuildOperation"
+          music, count = pattern.subn(replacement, music, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one source-routing helper block, replaced {count}')
+          music_path.write_text(music, encoding='utf-8')
+
+          pkg_path = Path('package.json')
+          pkg = json.loads(pkg_path.read_text(encoding='utf-8'))
+          pkg['version'] = '0.1.4'
+          check = pkg['scripts']['check']
+          if 'src/source-routing.js' not in check:
+              check = check.replace('node --check src/utils.js', 'node --check src/utils.js && node --check src/source-routing.js')
+          pkg['scripts']['check'] = check
+          pkg_path.write_text(json.dumps(pkg, indent=2) + '\n', encoding='utf-8')
+
+          test_content = r'''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { classifySpotifyInput, resolvePreferredSearch } from '../src/source-routing.js';
+
+          const config = fs.readFileSync('src/config.js', 'utf8');
+          const envExample = fs.readFileSync('.env.example', 'utf8');
+          const lavalink = fs.readFileSync('lavalink/application.yml', 'utf8');
+          const launcher = fs.readFileSync('start-bot.bat', 'utf8');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+
+          function fakeTarget(handler) {
+            const calls = [];
+            return {
+              calls,
+              async search(query, options = {}) {
+                calls.push({ query, options });
+                return handler(query, options, calls.length);
+              },
+            };
+          }
+
+          test('plain text routing uses YTM first and does not call YouTube when YTM succeeds', async () => {
+            const target = fakeTarget(async (_query, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: 'Rose' }] : [] }));
+            const result = await resolvePreferredSearch(target, 'D.O Rose', { id: 'u1' });
+            assert.equal(result.tracks[0].title, 'Rose');
+            assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:']);
+          });
+
+          test('YTM empty/error falls back once to normal YouTube', async () => {
+            for (const ytmMode of ['empty', 'error']) {
+              const target = fakeTarget(async (_query, options) => {
+                if (options.source === 'ytmsearch:') {
+                  if (ytmMode === 'error') throw new Error('ytm unavailable');
+                  return { tracks: [] };
+                }
+                if (options.source === 'ytsearch:') return { tracks: [{ title: 'fallback' }] };
+                throw new Error('unexpected route');
+              });
+              const result = await resolvePreferredSearch(target, 'D.O Rose', null);
+              assert.equal(result.tracks[0].title, 'fallback');
+              assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:', 'ytsearch:']);
+            }
+          });
+
+          test('direct URLs and explicit search prefixes are never rewritten', async () => {
+            for (const query of ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'ytsearch:D.O Rose', 'ytmsearch:D.O Rose', 'scsearch:D.O Rose']) {
+              const target = fakeTarget(async () => ({ tracks: [{ title: 'direct' }] }));
+              await resolvePreferredSearch(target, query, null);
+              assert.equal(target.calls.length, 1);
+              assert.equal(target.calls[0].query, query);
+              assert.equal(target.calls[0].options.source, undefined);
+            }
+          });
+
+          test('Spotify track/album/playlist references are strictly classified', () => {
+            const id = '4uLU6hMCjMI75M1A2tKUQC';
+            for (const value of [
+              `https://open.spotify.com/track/${id}?si=abc`,
+              `https://open.spotify.com/album/${id}`,
+              `https://open.spotify.com/playlist/${id}/`,
+              `https://open.spotify.com/intl-de/track/${id}`,
+              `spotify:track:${id}`,
+              `spotify:album:${id}`,
+              `spotify:playlist:${id}`,
+            ]) {
+              const info = classifySpotifyInput(value);
+              assert.equal(info.spotify, true, value);
+              assert.equal(info.supported, true, value);
+              assert.ok(['track', 'album', 'playlist'].includes(info.type), value);
+            }
+          });
+
+          test('unsupported or malformed Spotify objects are rejected before Lavalink', async () => {
+            const id = '4uLU6hMCjMI75M1A2tKUQC';
+            for (const query of [
+              `https://open.spotify.com/artist/${id}`,
+              `https://open.spotify.com/episode/${id}`,
+              `https://open.spotify.com/show/${id}`,
+              'https://open.spotify.com/track/not-a-valid-id',
+              `https://open.spotify.com/track/${id}/extra`,
+              `spotify:artist:${id}`,
+              'spotify:track:bad',
+            ]) {
+              const target = fakeTarget(async () => ({ tracks: [] }));
+              await assert.rejects(() => resolvePreferredSearch(target, query, null, { spotifyConfigured: true }), /Unsupported Spotify|Malformed Spotify/);
+              assert.equal(target.calls.length, 0, query);
+            }
+          });
+
+          test('Spotify short links and unconfigured Spotify fail clearly without search calls', async () => {
+            const id = '4uLU6hMCjMI75M1A2tKUQC';
+            const shortTarget = fakeTarget(async () => ({ tracks: [] }));
+            await assert.rejects(() => resolvePreferredSearch(shortTarget, 'https://spotify.link/example', null, { spotifyConfigured: true }), /Spotify short links/);
+            assert.equal(shortTarget.calls.length, 0);
+
+            const target = fakeTarget(async () => ({ tracks: [] }));
+            await assert.rejects(() => resolvePreferredSearch(target, `https://open.spotify.com/track/${id}`, null), /Spotify URL support is not configured/);
+            assert.equal(target.calls.length, 0);
+          });
+
+          test('configured valid Spotify references are passed directly to LavaSrc once', async () => {
+            const query = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc';
+            const target = fakeTarget(async () => ({ type: 'TRACK', tracks: [{ title: 'Spotify mirrored' }] }));
+            const result = await resolvePreferredSearch(target, query, { id: 'u1' }, { spotifyConfigured: true });
+            assert.equal(result.tracks[0].title, 'Spotify mirrored');
+            assert.equal(target.calls.length, 1);
+            assert.equal(target.calls[0].query, query);
+            assert.equal(target.calls[0].options.source, undefined);
+          });
+
+          test('Spotify remains optional and LavaSrc mirrors via YTM before YouTube', () => {
+            assert.equal(pkg.version, '0.1.4');
+            assert.match(envExample, /SPOTIFY_CLIENT_ID=/);
+            assert.match(envExample, /SPOTIFY_CLIENT_SECRET=/);
+            assert.match(config, /spotifyClientId/);
+            assert.match(config, /spotifyClientSecret/);
+            assert.match(lavalink, /lavasrc-plugin:4\.8\.3/);
+            assert.match(lavalink, /spotify:\s*\$\{SPOTIFY_ENABLED:false\}/);
+            const ytmProvider = lavalink.indexOf('ytmsearch:%QUERY%');
+            const ytProvider = lavalink.indexOf('ytsearch:%QUERY%');
+            assert.ok(ytmProvider >= 0 && ytProvider > ytmProvider, 'Spotify mirroring must prefer YTM before YouTube');
+          });
+
+          test('launcher passes Spotify secrets via child environment, not Java arguments', () => {
+            assert.match(launcher, /SPOTIFY_CLIENT_ID/);
+            assert.match(launcher, /SPOTIFY_CLIENT_SECRET/);
+            assert.match(launcher, /SPOTIFY_ENABLED='true'/);
+            assert.doesNotMatch(launcher, /-DSPOTIFY_CLIENT_SECRET|--plugins\.lavasrc\.spotify\.clientSecret/i);
+          });
+
+          test('new source support does not enable DSP or generic HTTP/local playback', () => {
+            assert.match(lavalink, /http:\s*false/);
+            assert.match(lavalink, /local:\s*false/);
+            for (const filter of ['equalizer', 'karaoke', 'timescale', 'tremolo', 'vibrato', 'distortion', 'rotation', 'channelMix', 'lowPass']) {
+              assert.match(lavalink, new RegExp(`${filter}:\\s*false`, 'i'));
+            }
+          });
+          '''
+          test_content = '\n'.join(line[10:] if line.startswith('          ') else line for line in test_content.splitlines()) + '\n'
+          Path('test/source-routing.test.js').write_text(test_content, encoding='utf-8')
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          env_anchor = 'LAVALINK_SECURE=false\n\nGEMINI_API_KEY='
+          env_insert = 'LAVALINK_SECURE=false\n\n# Optional Spotify URL metadata/mirroring (Spotify developer app required)\nSPOTIFY_CLIENT_ID=\nSPOTIFY_CLIENT_SECRET=\nSPOTIFY_COUNTRY_CODE=MY\n\nGEMINI_API_KEY='
+          if env_anchor in readme:
+              readme = readme.replace(env_anchor, env_insert, 1)
+          readme = readme.replace('- Gemini state\n- autoplay', '- Gemini state\n- Spotify URL mirror state\n- autoplay', 1)
+          readme = readme.replace('\nPR #1 remains Draft until the real Discord voice/audio/UI acceptance pass is complete.\n', '\n')
+          readme = readme.replace('## Search routing and Spotify URLs (v0.1.3)', '## Search routing and Spotify URLs (v0.1.4)')
+          old_para = 'Spotify links are metadata/mirroring only: LavaSrc resolves Spotify track/album/playlist metadata, then finds playable audio through YouTube Music first and normal YouTube second. Use full `open.spotify.com` URLs; LavaSrc 4.8.3 does not document `spotify.link` short URLs, so EZ Music rejects those with a clear message instead of silently misrouting them. EZ Music never streams Spotify audio directly. Add `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` to `.env` to enable this; leave both blank to keep Spotify disabled. The launcher passes those values only through the Lavalink child process environment, not on the Java command line.'
+          new_para = 'Spotify links are metadata/mirroring only: LavaSrc resolves Spotify track/album/playlist metadata, then finds playable audio through YouTube Music first and normal YouTube second. EZ Music now strictly accepts only Spotify **track, album, and playlist** references (including normal locale-prefixed `open.spotify.com` links) and rejects artist/episode/show/malformed objects before they reach Lavalink. Use full `open.spotify.com` URLs; LavaSrc 4.8.3 does not document `spotify.link` short URLs, so EZ Music rejects those with a clear message instead of silently misrouting them. EZ Music never streams Spotify audio directly. Add `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` to `.env` to enable this; leave both blank to keep Spotify disabled. The launcher passes those values only through the Lavalink child process environment, not on the Java command line.'
+          if old_para not in readme:
+              raise SystemExit('README Spotify paragraph anchor not found')
+          readme = readme.replace(old_para, new_para, 1)
+          readme_path.write_text(readme, encoding='utf-8')
+
+      - name: Validate modified branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --package-lock=false
+          npm run check
+          npm test
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/music.js src/source-routing.js test/source-routing.test.js package.json README.md
+          if git diff --cached --quiet; then
+            echo 'No patch changes to commit.'
+            exit 0
+          fi
+          git commit -m 'fix: harden Spotify source routing for v0.1.4'
+          git push origin HEAD:fix/spotify-routing-validation-v014
