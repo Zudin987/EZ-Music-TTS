@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from 'discord.js';
 import { formatDuration, truncate } from './utils.js';
 
 function prettyLoop(loop) {
@@ -11,6 +11,19 @@ function prettyAutoplay(mode) {
   if (mode === 'ai') return 'AI';
   if (mode === 'standard') return 'On';
   return 'Off';
+}
+
+function safeText(value, max) {
+  return truncate(escapeMarkdown(String(value ?? '')), max);
+}
+
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 export function playerButtons(player, autoplayMode = 'off') {
@@ -38,35 +51,49 @@ export function playerButtons(player, autoplayMode = 'off') {
 
 export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
   const requester = track?.requester?.displayName || track?.requester?.globalName || track?.requester?.username || 'Unknown';
-  const title = truncate(track?.title || 'Unknown title', 240);
-  const uri = track?.uri || track?.realUri;
+  const title = safeText(track?.title || 'Unknown title', 240);
+  const uri = safeHttpUrl(track?.uri || track?.realUri);
   const next = player?.queue?.[0];
   const queueCount = Number(player?.queue?.length || 0);
   const queueDuration = Number(player?.queue?.durationLength || 0);
 
   const embed = new EmbedBuilder()
     .setTitle('🎵 Now Playing')
-    .setDescription(uri ? `**[${title}](${uri})**` : `**${title}**`)
+    .setDescription(`**${title}**`)
     .addFields(
-      { name: '🎙️ Artist', value: truncate(track?.author || 'Unknown', 100), inline: true },
+      { name: '🎙️ Artist', value: safeText(track?.author || 'Unknown', 100), inline: true },
       { name: '⏱️ Duration', value: formatDuration(track?.length || 0), inline: true },
-      { name: '👤 Requester', value: truncate(requester, 100), inline: true },
+      { name: '👤 Requester', value: safeText(requester, 100), inline: true },
     )
     .setFooter({
       text: `Volume: ${Math.round(player?.volume ?? 0)}% | Loop: ${prettyLoop(player?.loop)} | Autoplay: ${prettyAutoplay(autoplayMode)} | Queue: ${queueCount}${queueDuration > 0 ? ` (${formatDuration(queueDuration)})` : ''}`,
     });
 
-  if (next) embed.addFields({ name: '⏭️ Up Next', value: `${truncate(next.title, 90)} • ${formatDuration(next.length || 0)}` });
-  if (track?.thumbnail) embed.setThumbnail(track.thumbnail);
+  if (uri) embed.setURL(uri);
+  if (next) embed.addFields({ name: '⏭️ Up Next', value: `${safeText(next.title, 90)} • ${formatDuration(next.length || 0)}` });
+  const thumbnail = safeHttpUrl(track?.thumbnail);
+  if (thumbnail) embed.setThumbnail(thumbnail);
   return embed;
 }
 
-export function queueText(player, max = 20) {
+export function queueText(player, max = 20, maxChars = 1850) {
   const current = player?.queue?.current;
   const upcoming = [...(player?.queue || [])].slice(0, max);
   const lines = [];
-  if (current) lines.push(`**Now:** ${truncate(current.title, 80)} — ${truncate(current.author, 45)}`);
-  lines.push(...upcoming.map((track, index) => `${index + 1}. **${truncate(track.title, 70)}** — ${truncate(track.author, 40)} (${formatDuration(track.length || 0)})`));
-  if ((player?.queue?.length || 0) > max) lines.push(`…and ${player.queue.length - max} more`);
-  return lines.join('\n') || 'Queue is empty.';
+  if (current) lines.push(`**Now:** ${safeText(current.title, 70)} — ${safeText(current.author, 35)}`);
+
+  let shown = 0;
+  for (let index = 0; index < upcoming.length; index += 1) {
+    const track = upcoming[index];
+    const line = `${index + 1}. **${safeText(track.title, 58)}** — ${safeText(track.author, 30)} (${formatDuration(track.length || 0)})`;
+    const candidate = [...lines, line].join('\n');
+    if (candidate.length > maxChars - 80) break;
+    lines.push(line);
+    shown += 1;
+  }
+
+  const hidden = Math.max(0, Number(player?.queue?.length || 0) - shown);
+  if (hidden > 0) lines.push(`…and ${hidden} more`);
+  const text = lines.join('\n') || 'Queue is empty.';
+  return truncate(text, maxChars);
 }
