@@ -7,6 +7,9 @@ services:
       - _JAVA_OPTIONS=-Xms128M -Xmx512M
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
-      - ./lavalink/plugins:/opt/Lavalink/plugins
+      - lavalink-plugins:/opt/Lavalink/plugins
     ports:
       - "127.0.0.1:2333:2333"
+
+volumes:
+  lavalink-plugins:
