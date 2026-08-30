@@ -8,7 +8,7 @@ const ui = fs.readFileSync('src/ui.js', 'utf8');
 const lavalink = fs.readFileSync('lavalink/application.yml', 'utf8');
 
 test('clear is a durable clear: invalidate stale work, disable loop/autoplay, then clear upcoming', () => {
-  const helper = commands.match(/function clearUpcomingQueue\([\s\S]*?\n}\n/)?.[0] || '';
+  const helper = commands.match(/function clearUpcomingQueue\([\s\S]*?\r?\n}\r?\n/)?.[0] || '';
   assert.match(helper, /invalidateQueueWork\(guildId\)/);
   assert.match(helper, /player\.setLoop\('none'\)/);
   assert.match(helper, /setGuildAutoplay\(guildId, 'off'\)/);
@@ -16,7 +16,7 @@ test('clear is a durable clear: invalidate stale work, disable loop/autoplay, th
 });
 
 test('stop fully resets previous state and stale async queue work', () => {
-  const helper = commands.match(/async function stopAndResetPlayer\([\s\S]*?\n}\n/)?.[0] || '';
+  const helper = commands.match(/async function stopAndResetPlayer\([\s\S]*?\r?\n}\r?\n/)?.[0] || '';
   assert.match(helper, /invalidateQueueWork\(guildId\)/);
   assert.match(helper, /player\.queue\.clear\(\)/);
   assert.match(helper, /player\.queue\.previous\.splice/);
