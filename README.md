@@ -104,6 +104,11 @@ LAVALINK_URL=localhost:2333
 LAVALINK_PASSWORD=ezmusic-local-only
 LAVALINK_SECURE=false
 
+# Optional Spotify URL metadata/mirroring (Spotify developer app required)
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+SPOTIFY_COUNTRY_CODE=MY
+
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3.5-flash-lite
 
@@ -231,6 +236,7 @@ The built-in Lavalink YouTube source is disabled. Generic arbitrary HTTP-source 
 - Lavalink availability
 - voice-transport ping while connected
 - Gemini state
+- Spotify URL mirror state
 - autoplay
 - saved volume
 - player state
@@ -292,13 +298,12 @@ GitHub Actions validates:
 - standalone Java 17 Lavalink 4.2.2 startup
 - YouTube plugin/source-manager loading through `/v4/info`
 
-PR #1 remains Draft until the real Discord voice/audio/UI acceptance pass is complete.
 
 
-## Search routing and Spotify URLs (v0.1.3)
+## Search routing and Spotify URLs (v0.1.4)
 
 Plain-text `/play` and `/playnext` searches now try **YouTube Music first** and fall back to normal **YouTube** only when YTM returns no usable result or errors. Direct URLs and explicit prefixes such as `ytsearch:` / `ytmsearch:` are never rewritten. `select:true` uses the same routing, so its private top-five picker is YTM-first too.
 
-Spotify links are metadata/mirroring only: LavaSrc resolves Spotify track/album/playlist metadata, then finds playable audio through YouTube Music first and normal YouTube second. Use full `open.spotify.com` URLs; LavaSrc 4.8.3 does not document `spotify.link` short URLs, so EZ Music rejects those with a clear message instead of silently misrouting them. EZ Music never streams Spotify audio directly. Add `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` to `.env` to enable this; leave both blank to keep Spotify disabled. The launcher passes those values only through the Lavalink child process environment, not on the Java command line.
+Spotify links are metadata/mirroring only: LavaSrc resolves Spotify track/album/playlist metadata, then finds playable audio through YouTube Music first and normal YouTube second. EZ Music now strictly accepts only Spotify **track, album, and playlist** references (including normal locale-prefixed `open.spotify.com` links) and rejects artist/episode/show/malformed objects before they reach Lavalink. Use full `open.spotify.com` URLs; LavaSrc 4.8.3 does not document `spotify.link` short URLs, so EZ Music rejects those with a clear message instead of silently misrouting them. EZ Music never streams Spotify audio directly. Add `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` to `.env` to enable this; leave both blank to keep Spotify disabled. The launcher passes those values only through the Lavalink child process environment, not on the Java command line.
 
 Spotify's 2026 Web API Development Mode requires the developer-app owner to have Spotify Premium. Development Mode playlist contents are also restricted to playlists the app user owns or collaborates on, so arbitrary public Spotify playlist URLs may require Extended Quota Mode; individual track/album URLs are the safer personal-bot use case.
