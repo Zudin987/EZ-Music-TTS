@@ -33,6 +33,31 @@ export function createMusic(client, config, gemini) {
   const lastTracks = new Map();
   const autoplayLocks = new Set();
   const voiceIds = new Map();
+  const queueRevisions = new Map();
+
+  function getQueueRevision(guildId) {
+    return queueRevisions.get(guildId) || 0;
+  }
+
+  function invalidateQueueWork(guildId) {
+    const revision = getQueueRevision(guildId) + 1;
+    queueRevisions.set(guildId, revision);
+    return revision;
+  }
+
+  function isQueueRevisionCurrent(guildId, revision) {
+    return getQueueRevision(guildId) === revision;
+  }
+
+  function queueRequestStillValid(player, revision) {
+    return music.players.get(player.guildId) === player && isQueueRevisionCurrent(player.guildId, revision);
+  }
+
+  function queueCanceledError(message = 'Queue request was canceled because the queue changed.') {
+    const error = new Error(message);
+    error.expected = true;
+    return error;
+  }
 
   // A persisted AI mode must not survive a restart where Gemini was removed.
   if (!gemini?.enabled && getAutoplayMode(config.discordGuildId) === 'ai') {
@@ -89,6 +114,16 @@ export function createMusic(client, config, gemini) {
   }
 
   async function handlePlayerEmpty(player) {
+    // Kazagumo can leave its paused flag set when a paused track is skipped or
+    // stopped. Normalize both the wrapper and Lavalink state before any future
+    // autoplay/new play request so an old pause cannot silently block playback.
+    if (player.paused || player.shoukaku?.paused) {
+      try { await player.shoukaku.setPaused(false); }
+      catch (error) { console.warn('[player-empty] unable to reset paused state', error?.message || error); }
+      player.paused = false;
+    }
+    player.playing = false;
+
     const filled = await refillAutoplay(player).catch((error) => {
       console.warn('[autoplay]', error?.message || error);
       return false;
@@ -100,6 +135,9 @@ export function createMusic(client, config, gemini) {
   }
 
   async function handlePlayerDestroy(player) {
+    // Never allow an old /play, /ai or /radio request to enqueue into a player
+    // that has already been destroyed/recreated.
+    invalidateQueueWork(player.guildId);
     clearDisconnect(player.guildId);
     await clearVoiceStatus(player);
     voiceIds.delete(player.guildId);
@@ -167,14 +205,16 @@ export function createMusic(client, config, gemini) {
     await client.rest.put(`/channels/${voiceId}/voice-status`, { body: { status: null } }).catch(() => {});
   }
 
-  async function resolveQueries(player, queries, requester, seen = new Set(), limit = 5, concurrency = 3) {
+  async function resolveQueries(player, queries, requester, seen = new Set(), limit = 5, concurrency = 3, revision = null) {
     const selected = [];
     const cleanQueries = (queries || []).filter(Boolean);
     const width = Math.max(1, Math.min(5, concurrency));
 
     for (let offset = 0; offset < cleanQueries.length && selected.length < limit; offset += width) {
+      if (revision !== null && !queueRequestStillValid(player, revision)) break;
       const batch = cleanQueries.slice(offset, offset + width);
       const results = await Promise.all(batch.map((query) => player.search(query, { requester }).catch(() => null)));
+      if (revision !== null && !queueRequestStillValid(player, revision)) break;
       for (const result of results) {
         const track = result?.tracks?.find((candidate) => {
           const key = trackKey(candidate);
@@ -227,35 +267,37 @@ export function createMusic(client, config, gemini) {
     return selected.slice(0, limit);
   }
 
-  async function aiRecommendations(player, limit = 5) {
+  async function aiRecommendations(player, limit = 5, revision = null) {
     if (!gemini?.enabled) return [];
     const recent = recentHistory(player.guildId, 20);
     const plan = await gemini.makeQueue('Continue this listening session naturally. Recommend songs that fit what this server has been playing. Avoid repeats.', { recent, maxSongs: limit });
+    if (revision !== null && !queueRequestStillValid(player, revision)) return [];
     const seen = new Set(recent.map((row) => trackKey(row)).filter(Boolean));
-    return resolveQueries(player, plan.queries.slice(0, limit), client.user, seen, limit, 3);
+    return resolveQueries(player, plan.queries.slice(0, limit), client.user, seen, limit, 3, revision);
   }
 
   async function refillAutoplay(player) {
     const mode = getAutoplayMode(player.guildId);
     if (mode === 'off' || autoplayLocks.has(player.guildId)) return false;
+    const revision = getQueueRevision(player.guildId);
     autoplayLocks.add(player.guildId);
     try {
       const seed = lastTracks.get(player.guildId);
       let tracks = [];
       if (mode === 'ai') {
         try {
-          tracks = await aiRecommendations(player, 5);
+          tracks = await aiRecommendations(player, 5, revision);
         } catch (error) {
           console.warn('[autoplay] AI continuation unavailable; falling back to standard recommendations:', error?.message || error);
         }
-        if (!tracks.length) tracks = await standardRecommendations(player, seed, 5);
+        if (!tracks.length && queueRequestStillValid(player, revision)) tracks = await standardRecommendations(player, seed, 5);
       } else {
         tracks = await standardRecommendations(player, seed, 5);
       }
 
-      // The user may have disabled/switched autoplay, or destroyed the player,
-      // while network/AI searches were still in flight. Never enqueue stale work.
-      if (getAutoplayMode(player.guildId) !== mode || music.players.get(player.guildId) !== player) return false;
+      // The user may have cleared/stopped the queue, disabled/switched autoplay,
+      // or destroyed the player while network/AI searches were in flight.
+      if (getAutoplayMode(player.guildId) !== mode || !queueRequestStillValid(player, revision)) return false;
       if (!tracks.length) return false;
       player.queue.add([...tracks]);
       if (!player.playing && !player.paused) await player.play();
@@ -265,11 +307,21 @@ export function createMusic(client, config, gemini) {
     }
   }
 
-  async function startServerRadio(player, requester) {
+  async function startServerRadio(player, requester, revision = getQueueRevision(player.guildId)) {
     const history = recentHistory(player.guildId, 100);
     if (!history.length) throw new Error('Server radio needs some listening history first. Play a few songs, then try again.');
+    if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
 
     const seen = new Set(history.slice(0, 15).map((row) => trackKey(row)).filter(Boolean));
+    if (player.queue.current) {
+      const key = trackKey(player.queue.current);
+      if (key) seen.add(key);
+    }
+    for (const track of player.queue) {
+      const key = trackKey(track);
+      if (key) seen.add(key);
+    }
+
     const picked = [];
     const uniqueSeedKeys = new Set();
     const seeds = [];
@@ -284,8 +336,10 @@ export function createMusic(client, config, gemini) {
     // Resolve a few recommendation seeds in parallel so /radio does not make
     // every network lookup wait for the previous one to finish.
     for (let offset = 0; offset < seeds.length && picked.length < 15; offset += 3) {
+      if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
       const batch = seeds.slice(offset, offset + 3);
       const recommendationSets = await Promise.all(batch.map((seed) => standardRecommendations(player, seed, 5, requester).catch(() => [])));
+      if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
       for (const recommendations of recommendationSets) {
         for (const track of recommendations) {
           const key = trackKey(track);
@@ -298,12 +352,14 @@ export function createMusic(client, config, gemini) {
       }
     }
 
-    if (picked.length < 5 && gemini?.enabled) {
+    if (picked.length < 5 && gemini?.enabled && queueRequestStillValid(player, revision)) {
       try {
         const extra = await gemini.makeQueue('Build a server radio from this listening history. Pick varied songs that fit the established taste and avoid exact repeats.', { recent: history.slice(0, 25), maxSongs: 10 });
-        const resolved = await resolveQueries(player, extra.queries, requester, seen, 15 - picked.length, 3);
+        if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
+        const resolved = await resolveQueries(player, extra.queries, requester, seen, 15 - picked.length, 3, revision);
         picked.push(...resolved);
       } catch (error) {
+        if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
         console.warn('[radio] Gemini enhancement unavailable:', error?.message || error);
       }
     }
@@ -311,14 +367,15 @@ export function createMusic(client, config, gemini) {
     // Last-resort fallback: prefer older history. If the server is brand-new and
     // has fewer than 16 history entries, replaying a recent known-good track is
     // better than claiming radio cannot be built at all.
-    if (!picked.length) {
+    if (!picked.length && queueRequestStillValid(player, revision)) {
       const fallbackRows = radioFallbackHistory(history, 15, 10);
       const fallbackQueries = fallbackRows.map((row) => row.uri || `${row.author || ''} ${row.title || ''}`.trim()).filter(Boolean);
-      const fallbackSeen = new Set();
-      const resolved = await resolveQueries(player, fallbackQueries, requester, fallbackSeen, 10, 3);
+      const fallbackSeen = new Set(seen);
+      const resolved = await resolveQueries(player, fallbackQueries, requester, fallbackSeen, 10, 3, revision);
       picked.push(...resolved);
     }
 
+    if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
     if (!picked.length) throw new Error('Could not build server radio from the available sources.');
     const count = picked.length;
     player.queue.add([...picked]);
@@ -348,5 +405,8 @@ export function createMusic(client, config, gemini) {
     getGuildAutoplay: getAutoplayMode,
     getGuildVolume,
     setGuildVolume,
+    getQueueRevision,
+    invalidateQueueWork,
+    isQueueRevisionCurrent,
   };
 }
