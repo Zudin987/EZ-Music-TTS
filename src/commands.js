@@ -1,11 +1,11 @@
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { REST, Routes, SlashCommandBuilder, escapeMarkdown } from 'discord.js';
 import { recentHistory } from './storage.js';
 import { queueText } from './ui.js';
 import { truncate } from './utils.js';
 
-const defs = [
-  new SlashCommandBuilder().setName('play').setDescription('Play or queue a song/playlist').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true)),
-  new SlashCommandBuilder().setName('playnext').setDescription('Put a song/playlist directly after the current song').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true)),
+export const commandDefinitions = [
+  new SlashCommandBuilder().setName('play').setDescription('Play or queue a song/playlist').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)),
+  new SlashCommandBuilder().setName('playnext').setDescription('Put a song/playlist directly after the current song').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)),
   new SlashCommandBuilder().setName('pause').setDescription('Pause playback'),
   new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
   new SlashCommandBuilder().setName('skip').setDescription('Skip the current song'),
@@ -19,7 +19,9 @@ const defs = [
   new SlashCommandBuilder().setName('loop').setDescription('Set loop mode').addStringOption(o => o.setName('mode').setDescription('Loop mode').setRequired(true).addChoices({name:'Off',value:'none'},{name:'Track',value:'track'},{name:'Queue',value:'queue'})),
   new SlashCommandBuilder().setName('autoplay').setDescription('Turn source-based autoplay on or off').addStringOption(o => o.setName('mode').setDescription('Autoplay').setRequired(true).addChoices({name:'On',value:'on'},{name:'Off',value:'off'})),
   new SlashCommandBuilder().setName('radio').setDescription('Radio controls').addSubcommand(s => s.setName('server').setDescription('Build radio from this server\'s listening history')),
-  new SlashCommandBuilder().setName('ai').setDescription('Gemini AI DJ').addStringOption(o => o.setName('request').setDescription('Natural-language music request').setRequired(false)).addStringOption(o => o.setName('autoplay').setDescription('AI autoplay').setRequired(false).addChoices({name:'On',value:'on'},{name:'Off',value:'off'})),
+  new SlashCommandBuilder().setName('ai').setDescription('Gemini AI DJ')
+    .addStringOption(o => o.setName('request').setDescription('Natural-language music request').setRequired(false).setMaxLength(500))
+    .addStringOption(o => o.setName('autoplay').setDescription('AI autoplay').setRequired(false).addChoices({name:'On',value:'on'},{name:'Off',value:'off'})),
   new SlashCommandBuilder().setName('help').setDescription('Show commands'),
   new SlashCommandBuilder().setName('ping').setDescription('Show Discord latency'),
   new SlashCommandBuilder().setName('status').setDescription('Show music bot status'),
@@ -27,8 +29,8 @@ const defs = [
 
 export async function registerGuildCommands(config) {
   const rest = new REST({ version: '10' }).setToken(config.discordToken);
-  await rest.put(Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId), { body: defs });
-  console.log(`[discord] registered ${defs.length} guild commands`);
+  await rest.put(Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId), { body: commandDefinitions });
+  console.log(`[discord] registered ${commandDefinitions.length} guild commands`);
 }
 
 function getPlayer(music, guildId) {
@@ -43,18 +45,40 @@ function requireSameVoice(interaction, player) {
   if (player.voiceId && voiceId !== player.voiceId) throw new Error('Join the same voice channel as the bot first.');
 }
 
+function requireVoiceForSetting(interaction, music) {
+  const player = music.players.get(interaction.guildId);
+  if (player) return requireSameVoice(interaction, player);
+  if (!interaction.member?.voice?.channelId) throw new Error('Join a voice channel first.');
+}
+
+function requireCurrentTrack(player) {
+  if (!player?.queue?.current) throw new Error('Nothing is playing.');
+}
+
+function skipCurrent(player) {
+  requireCurrentTrack(player);
+  // Kazagumo requeues the current track when track-loop is active, so /skip
+  // must disable that mode first or the same song immediately starts again.
+  if (player.loop === 'track') player.setLoop('none');
+  player.skip();
+}
+
 async function searchTracks(player, query, requester) {
   const result = await player.search(query, { requester });
-  if (!result?.tracks?.length) throw new Error(`No results for: ${query}`);
-  return { result, tracks: result.type === 'PLAYLIST' ? result.tracks : [result.tracks[0]] };
+  if (!result?.tracks?.length) throw new Error(`No results for: ${truncate(query, 120)}`);
+  return { result, tracks: result.type === 'PLAYLIST' ? [...result.tracks] : [result.tracks[0]] };
 }
 
 async function searchAndQueue(player, query, requester, next = false) {
   const { tracks, result } = await searchTracks(player, query, requester);
   if (next) player.queue.unshift(...tracks);
-  else player.queue.add(tracks);
+  else player.queue.add([...tracks]);
   if (!player.playing && !player.paused) await player.play();
   return { tracks, result };
+}
+
+function safeTitle(track, max = 100) {
+  return truncate(escapeMarkdown(track?.title || 'Unknown title'), max);
 }
 
 function helpText() {
@@ -74,21 +98,21 @@ function helpText() {
 export function createInteractionHandler({ client, music, ensurePlayer, gemini, showPanel, refreshPanel, startServerRadio, setGuildAutoplay, getGuildAutoplay }) {
   return async function handle(interaction) {
     try {
-      if (interaction.isButton()) return handleButton(interaction, { music, gemini, refreshPanel, setGuildAutoplay, getGuildAutoplay });
+      if (interaction.isButton()) return await handleButton(interaction, { music, gemini, refreshPanel, setGuildAutoplay, getGuildAutoplay });
       if (!interaction.isChatInputCommand()) return;
 
       const name = interaction.commandName;
       if (name === 'help') return interaction.reply({ ephemeral: true, content: helpText() });
-      if (name === 'ping') return interaction.reply({ ephemeral: true, content: `🏓 Discord gateway: **${Math.round(client.ws.ping)} ms**` });
+      if (name === 'ping') return interaction.reply({ ephemeral: true, content: `🏓 Discord gateway: **${Math.max(0, Math.round(client.ws.ping))} ms**` });
       if (name === 'status') {
         const player = music.players.get(interaction.guildId);
         const mode = getGuildAutoplay(interaction.guildId);
         let lavalink = 'Unavailable';
-        try { lavalink = music.getLeastUsedNode() ? 'Connected' : 'Unavailable'; } catch { /* no node */ }
+        try { await music.getLeastUsedNode(); lavalink = 'Connected'; } catch { /* no online node */ }
         const lines = [
-          `Discord: **Online** (${Math.round(client.ws.ping)} ms)`,
+          `Discord: **Online** (${Math.max(0, Math.round(client.ws.ping))} ms)`,
           `Lavalink: **${lavalink}**`,
-          `Gemini: **${gemini.enabled ? `Ready (${gemini.model})` : 'Not configured'}**`,
+          `Gemini: **${gemini.enabled ? `Configured (${gemini.model})` : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Player: **${player ? (player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
         ];
@@ -102,14 +126,16 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         const { tracks, result } = await searchAndQueue(player, interaction.options.getString('query', true), interaction.user, name === 'playnext');
         await refreshPanel(player).catch(() => {});
         const where = name === 'playnext' ? 'Queued next' : 'Queued';
-        return interaction.editReply(result.type === 'PLAYLIST' ? `${where} **${tracks.length} tracks**.` : `${where} **${truncate(tracks[0].title, 100)}**.`);
+        return interaction.editReply(result.type === 'PLAYLIST' ? `${where} **${tracks.length} tracks**.` : `${where} **${safeTitle(tracks[0])}**.`);
       }
 
       if (name === 'ai') {
         const autoplay = interaction.options.getString('autoplay');
         const request = interaction.options.getString('request');
         if (!autoplay && !request) throw new Error('Use either `request` or `autoplay`.');
+        if (autoplay && request) throw new Error('Use `request` or `autoplay`, not both at the same time.');
         if (autoplay) {
+          requireVoiceForSetting(interaction, music);
           const mode = autoplay === 'on' ? 'ai' : 'off';
           setGuildAutoplay(interaction.guildId, mode);
           return interaction.reply(`🤖 AI autoplay: **${autoplay.toUpperCase()}**.`);
@@ -121,16 +147,18 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
         for (const query of plan.queries) {
           try {
             const result = await player.search(query, { requester: interaction.user });
-            if (result?.tracks?.[0]) { player.queue.add(result.tracks[0]); added.push(result.tracks[0]); }
+            if (result?.tracks?.[0]) added.push(result.tracks[0]);
           } catch { /* one failed search should not cancel the AI queue */ }
         }
         if (!added.length) throw new Error('Gemini suggested songs, but none could be resolved by the music source.');
+        player.queue.add([...added]);
         if (!player.playing && !player.paused) await player.play();
         await refreshPanel(player).catch(() => {});
-        return interaction.editReply(`🤖 **${plan.summary}**\nQueued ${added.length} song${added.length === 1 ? '' : 's'}.`);
+        return interaction.editReply(`🤖 **${truncate(escapeMarkdown(plan.summary), 600)}**\nQueued ${added.length} song${added.length === 1 ? '' : 's'}.`);
       }
 
       if (name === 'autoplay') {
+        requireVoiceForSetting(interaction, music);
         const enabled = interaction.options.getString('mode', true) === 'on';
         setGuildAutoplay(interaction.guildId, enabled ? 'standard' : 'off');
         return interaction.reply(`Autoplay: **${enabled ? 'ON' : 'OFF'}**.`);
@@ -147,22 +175,35 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
 
       const player = getPlayer(music, interaction.guildId);
       if (name === 'nowplaying') {
+        requireSameVoice(interaction, player);
+        requireCurrentTrack(player);
+        player.setTextChannel(interaction.channelId);
         const message = await showPanel(player);
         if (!message) throw new Error('Could not create the player panel in this channel.');
         return interaction.reply({ ephemeral: true, content: 'Player panel recreated.' });
       }
       requireSameVoice(interaction, player);
 
-      if (name === 'pause') { player.pause(true); await refreshPanel(player); return interaction.reply('Paused.'); }
-      if (name === 'resume') { player.pause(false); await refreshPanel(player); return interaction.reply('Resumed.'); }
-      if (name === 'skip') { player.skip(); return interaction.reply('Skipped.'); }
+      if (name === 'pause') { requireCurrentTrack(player); player.pause(true); await refreshPanel(player); return interaction.reply('Paused.'); }
+      if (name === 'resume') { requireCurrentTrack(player); player.pause(false); await refreshPanel(player); return interaction.reply('Resumed.'); }
+      if (name === 'skip') { skipCurrent(player); return interaction.reply('Skipped.'); }
       if (name === 'previous') {
-        const prev = player.getPrevious(true);
+        const prev = player.getPrevious(false);
         if (!prev) throw new Error('No previous song is available.');
         await player.play(prev);
-        return interaction.reply(`Playing previous: **${truncate(prev.title, 100)}**.`);
+        player.getPrevious(true);
+        return interaction.reply(`Playing previous: **${safeTitle(prev)}**.`);
       }
-      if (name === 'stop') { player.queue.clear(); player.setLoop('none'); setGuildAutoplay(interaction.guildId, 'off'); player.skip(); return interaction.reply('Stopped and cleared the queue.'); }
+      if (name === 'stop') {
+        player.queue.clear();
+        player.setLoop('none');
+        setGuildAutoplay(interaction.guildId, 'off');
+        if (player.queue.current) {
+          if (player.loop === 'track') player.setLoop('none');
+          player.skip();
+        }
+        return interaction.reply('Stopped and cleared the queue.');
+      }
       if (name === 'disconnect') { await player.destroy(); return interaction.reply('Disconnected.'); }
       if (name === 'volume') {
         const n = interaction.options.getInteger('percent', true);
@@ -180,7 +221,11 @@ export function createInteractionHandler({ client, music, ensurePlayer, gemini, 
       }
     } catch (error) {
       console.error('[interaction]', error);
-      const message = `⚠️ ${error?.message || 'Something went wrong.'}`;
+      const message = `⚠️ ${truncate(error?.message || 'Something went wrong.', 1800)}`;
+      if (interaction.isButton()) {
+        if (interaction.deferred || interaction.replied) return interaction.followUp({ ephemeral: true, content: message }).catch(() => {});
+        return interaction.reply({ ephemeral: true, content: message }).catch(() => {});
+      }
       if (interaction.deferred || interaction.replied) return interaction.editReply({ content: message, embeds: [], components: [] }).catch(() => {});
       return interaction.reply({ ephemeral: true, content: message }).catch(() => {});
     }
@@ -193,23 +238,31 @@ async function handleButton(interaction, { music, gemini, refreshPanel, setGuild
 
   if (action === 'queue') return interaction.reply({ ephemeral: true, content: queueText(player) });
   requireSameVoice(interaction, player);
-  if (action === 'pause') player.pause(true);
-  else if (action === 'resume') player.pause(false);
-  else if (action === 'skip') { await interaction.deferUpdate(); player.skip(); return; }
+
+  if (action === 'previous' && !player.getPrevious(false)) throw new Error('No previous song is available.');
+
+  await interaction.deferUpdate();
+
+  if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }
+  else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }
+  else if (action === 'skip') { skipCurrent(player); return; }
   else if (action === 'previous') {
-    const prev = player.getPrevious(true);
-    if (!prev) throw new Error('No previous song is available.');
-    await interaction.deferUpdate();
-    await player.play(prev);
+    const previous = player.getPrevious(false);
+    if (!previous) throw new Error('No previous song is available.');
+    await player.play(previous);
+    player.getPrevious(true);
     return;
-  } else if (action === 'shuffle') player.queue.shuffle();
+  }
+  else if (action === 'shuffle') player.queue.shuffle();
   else if (action === 'clear') player.queue.clear();
   else if (action === 'stop') {
     player.queue.clear();
     player.setLoop('none');
     setGuildAutoplay(interaction.guildId, 'off');
-    await interaction.deferUpdate();
-    player.skip();
+    if (player.queue.current) {
+      if (player.loop === 'track') player.setLoop('none');
+      player.skip();
+    } else await refreshPanel(player).catch(() => {});
     return;
   } else if (action === 'loop') {
     const next = player.loop === 'none' ? 'track' : player.loop === 'track' ? 'queue' : 'none';
@@ -222,8 +275,9 @@ async function handleButton(interaction, { music, gemini, refreshPanel, setGuild
     await player.setVolume(Math.max(0, player.volume - 10));
   } else if (action === 'volume_up') {
     await player.setVolume(Math.min(100, player.volume + 10));
+  } else {
+    throw new Error('Unknown player control. Recreate the panel with `/nowplaying`.');
   }
 
   await refreshPanel(player).catch(() => {});
-  return interaction.deferUpdate();
 }
