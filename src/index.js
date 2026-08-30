@@ -41,6 +41,8 @@ client.once(Events.ClientReady, async () => {
   catch (error) { console.error('[discord] command registration failed', error); }
   client.user.setActivity('raw music • /play');
   console.log(`[gemini] ${gemini.enabled ? `configured (${config.geminiModel})` : 'disabled'}`);
+  const recovery = playerApi.getRecoverableSession(config.discordGuildId);
+  if (recovery) console.log(`[recovery] saved session available: ${recovery.current?.title || 'queue'} + ${recovery.queue?.length || 0} upcoming; use /status to resume or discard`);
 });
 
 client.on('interactionCreate', createInteractionHandler({ client, gemini, ...playerApi }));
@@ -53,6 +55,11 @@ async function shutdown(signal, exitCode = 0) {
   process.exitCode = exitCode;
   console.log(`[shutdown] ${signal}`);
 
+  // Preserve a lightweight session snapshot before intentional process shutdown.
+  // Explicit Discord /stop or /disconnect clears recovery itself; this path is
+  // for restarts, Windows shutdowns and crashes where offering Resume is useful.
+  try { playerApi.checkpointAllRecoveries(); }
+  catch (error) { console.warn('[shutdown] recovery checkpoint failed', error?.message || error); }
   await Promise.allSettled([...playerApi.music.players.values()].map((player) => player.destroy()));
   client.destroy();
   try { closeStorage(); }

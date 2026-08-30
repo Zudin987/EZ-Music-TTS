@@ -1,6 +1,17 @@
 import { Kazagumo } from 'kazagumo';
 import { Connectors } from 'shoukaku';
-import { addHistory, getAutoplayMode, getGuildVolume as getStoredVolume, recentHistory, setAutoplayMode, setGuildVolume as setStoredVolume } from './storage.js';
+import {
+  addHistory,
+  deleteRecoverySession,
+  getAutoplayMode,
+  getGuildVolume as getStoredVolume,
+  getRecoverySession as getStoredRecoverySession,
+  recentHistory,
+  saveRecoverySession,
+  setAutoplayMode,
+  setGuildVolume as setStoredVolume,
+  updateRecoveryPosition,
+} from './storage.js';
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 
 const MAX_UPCOMING_QUEUE = 300;
@@ -9,6 +20,9 @@ const SOURCE_FAILURE_THRESHOLD = 3;
 const SOURCE_RETRY_MS = 60_000;
 const SOURCE_STABLE_MS = 20_000;
 const EMPTY_VOICE_GRACE_MS = 120_000;
+const RECOVERY_SAVE_DEBOUNCE_MS = 750;
+const RECOVERY_POSITION_SAVE_MS = 15_000;
+const RECOVERY_SYNC_BATCH = 20;
 
 function youtubeId(track) {
   const direct = String(track?.identifier || '').trim();
@@ -46,6 +60,25 @@ export function createMusic(client, config, gemini) {
   const heldQueues = new Map();
   const sourceRetryTimers = new Map();
   const sourceSuccessTimers = new Map();
+  const recoverySaveTimers = new Map();
+  const recoveryPositionSavedAt = new Map();
+  const operationChains = new Map();
+  const playerCreationPromises = new Map();
+  const recoveryResumes = new Set();
+
+  async function withGuildOperation(guildId, task) {
+    const previous = operationChains.get(guildId) || Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    operationChains.set(guildId, current);
+    await previous.catch(() => {});
+    try {
+      return await task();
+    } finally {
+      release();
+      if (operationChains.get(guildId) === current) operationChains.delete(guildId);
+    }
+  }
 
   function getQueueRevision(guildId) {
     return queueRevisions.get(guildId) || 0;
@@ -85,6 +118,189 @@ export function createMusic(client, config, gemini) {
 
   function getHeldQueueCount(guildId) {
     return heldQueues.get(guildId)?.length || 0;
+  }
+
+  function getHeldQueueSnapshot(guildId) {
+    return [...(heldQueues.get(guildId) || [])];
+  }
+
+  function clearRecoverySaveTimer(guildId) {
+    const timer = recoverySaveTimers.get(guildId);
+    if (timer) clearTimeout(timer);
+    recoverySaveTimers.delete(guildId);
+  }
+
+  function recoveryQueue(player) {
+    const held = getHeldQueueSnapshot(player.guildId);
+    return [...player.queue, ...held].slice(0, MAX_UPCOMING_QUEUE);
+  }
+
+  function persistRecovery(player) {
+    if (!player || music.players.get(player.guildId) !== player) return false;
+    const queue = recoveryQueue(player);
+    const current = player.queue.current || null;
+    if (!current && !queue.length) {
+      deleteRecoverySession(player.guildId);
+      return false;
+    }
+    return saveRecoverySession(player.guildId, {
+      voiceId: player.voiceId || voiceIds.get(player.guildId) || '',
+      textId: player.textId || '',
+      current,
+      queue,
+      positionMs: Number(player.position || 0),
+      volumePercent: Number(player.volume || getStoredVolume(player.guildId, config.defaultVolume)),
+      loopMode: player.loop || 'none',
+      autoplayMode: getAutoplayMode(player.guildId),
+      paused: Boolean(player.paused),
+    });
+  }
+
+  function scheduleRecoverySave(player, delay = RECOVERY_SAVE_DEBOUNCE_MS) {
+    if (!player) return;
+    clearRecoverySaveTimer(player.guildId);
+    const timer = setTimeout(() => {
+      recoverySaveTimers.delete(player.guildId);
+      try { persistRecovery(player); }
+      catch (error) { console.warn('[recovery] save failed', error?.message || error); }
+    }, Math.max(0, delay));
+    timer.unref?.();
+    recoverySaveTimers.set(player.guildId, timer);
+  }
+
+  function checkpointRecovery(player) {
+    clearRecoverySaveTimer(player?.guildId);
+    try { return persistRecovery(player); }
+    catch (error) {
+      console.warn('[recovery] checkpoint failed', error?.message || error);
+      return false;
+    }
+  }
+
+  function clearRecoverySession(guildId) {
+    clearRecoverySaveTimer(guildId);
+    recoveryPositionSavedAt.delete(guildId);
+    return deleteRecoverySession(guildId);
+  }
+
+  function getRecoverableSession(guildId) {
+    if (music.players.get(guildId)?.queue?.current) return null;
+    return getStoredRecoverySession(guildId);
+  }
+
+  async function resolveStoredTrack(player, row, requester) {
+    if (!row) return null;
+    const primary = String(row.uri || '').trim() || `${row.author || ''} ${row.title || ''}`.trim();
+    if (!primary) return null;
+    let result = await player.search(primary, { requester }).catch(() => null);
+    if (!result?.tracks?.length && row.title) {
+      result = await player.search(`${row.author || ''} ${row.title}`.trim(), { requester }).catch(() => null);
+    }
+    return result?.tracks?.[0] || null;
+  }
+
+  async function resolveStoredBatch(player, rows, requester, revision) {
+    const resolved = [];
+    for (let offset = 0; offset < rows.length; offset += 4) {
+      if (!queueRequestStillValid(player, revision)) break;
+      const batch = rows.slice(offset, offset + 4);
+      const tracks = await Promise.all(batch.map((row) => resolveStoredTrack(player, row, requester)));
+      if (!queueRequestStillValid(player, revision)) break;
+      resolved.push(...tracks.filter(Boolean));
+    }
+    return resolved;
+  }
+
+  async function restoreRecoveryTail(player, rows, requester, revision) {
+    try {
+      for (let offset = 0; offset < rows.length; offset += 12) {
+        if (!queueRequestStillValid(player, revision)) return;
+        const resolved = await resolveStoredBatch(player, rows.slice(offset, offset + 12), requester, revision);
+        if (!resolved.length) continue;
+        await withGuildOperation(player.guildId, async () => {
+          if (!queueRequestStillValid(player, revision)) return;
+          queueTracks(player, resolved);
+          scheduleRecoverySave(player);
+        });
+        if (player.queue.length >= MAX_UPCOMING_QUEUE) return;
+      }
+    } catch (error) {
+      console.warn('[recovery] background queue restore stopped', error?.message || error);
+    }
+  }
+
+  async function resumeRecoverySession(interaction, session) {
+    const guildId = interaction.guildId;
+    if (!session) throw queueCanceledError('No recent recoverable session is available.');
+    if (recoveryResumes.has(guildId)) throw queueCanceledError('A session restore is already in progress for this server.');
+    if (music.players.get(guildId)) throw queueCanceledError('A voice session is already active. Stop or disconnect it before restoring an older session.');
+
+    recoveryResumes.add(guildId);
+    try {
+      const player = await ensurePlayer(interaction);
+      const revision = invalidateQueueWork(guildId);
+      const requester = interaction.user || client.user;
+      const rows = Array.isArray(session.queue) ? session.queue.slice(0, MAX_UPCOMING_QUEUE) : [];
+      const currentRow = session.current || rows.shift() || null;
+      const currentTrack = await resolveStoredTrack(player, currentRow, requester);
+      const initialRows = rows.slice(0, RECOVERY_SYNC_BATCH);
+      const initialTracks = await resolveStoredBatch(player, initialRows, requester, revision);
+
+      if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Session restore was canceled because the queue changed.');
+      if (!currentTrack && !initialTracks.length) {
+        clearRecoverySession(guildId);
+        await player.destroy().catch(() => {});
+        throw new Error('The saved session could not be resolved by the current music source.');
+      }
+
+      await withGuildOperation(guildId, async () => {
+        if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Session restore was canceled because the queue changed.');
+        player.queue.clear();
+        const restoredUpcoming = [...initialTracks];
+        const startTrack = currentTrack || restoredUpcoming.shift();
+        if (!startTrack) throw new Error('No recoverable track could be loaded.');
+        const maxPosition = Math.max(0, Number(startTrack.length || 0));
+        const requestedPosition = currentTrack ? Math.max(0, Number(session.positionMs || 0)) : 0;
+        const startPosition = maxPosition ? Math.min(Math.max(0, maxPosition - 1), requestedPosition) : requestedPosition;
+        // Kazagumo/Shoukaku call this field `position` (milliseconds). Using an
+        // invented `startTime` key silently starts from zero after a restart.
+        // Start the recovered current track before adding upcoming items because
+        // queue.add() on an empty player promotes its first item to queue.current.
+        await player.play(startTrack, { replaceCurrent: true, position: Math.max(0, startPosition) });
+        if (restoredUpcoming.length) queueTracks(player, restoredUpcoming);
+        const loop = ['none', 'track', 'queue'].includes(session.loopMode) ? session.loopMode : 'none';
+        player.setLoop(loop);
+        let autoplay = ['off', 'standard', 'ai'].includes(session.autoplayMode) ? session.autoplayMode : 'off';
+        if (autoplay === 'ai' && !gemini?.enabled) autoplay = 'off';
+        setAutoplayMode(player.guildId, autoplay);
+        const volume = Math.max(0, Math.min(100, Number(session.volumePercent ?? getStoredVolume(player.guildId, config.defaultVolume))));
+        await player.setVolume(volume);
+        setStoredVolume(player.guildId, Math.round(volume));
+        if (session.paused) player.pause(true);
+        scheduleRecoverySave(player, 0);
+      });
+
+      // The saved record is now represented by the live player. The live
+      // checkpoint immediately replaces it; deleting first avoids a stale record
+      // if background resolution later fails.
+      deleteRecoverySession(guildId);
+      checkpointRecovery(player);
+
+      const tail = rows.slice(RECOVERY_SYNC_BATCH);
+      if (tail.length) void restoreRecoveryTail(player, tail, requester, revision);
+      return {
+        current: player.queue.current,
+        restoredNow: Number(player.queue.length || 0),
+        restoring: tail.length,
+        savedTotal: rows.length,
+      };
+    } finally {
+      recoveryResumes.delete(guildId);
+    }
+  }
+
+  function checkpointAllRecoveries() {
+    for (const player of music.players.values()) checkpointRecovery(player);
   }
 
   function clearSourceRetry(guildId) {
@@ -170,16 +386,20 @@ export function createMusic(client, config, gemini) {
       }
 
       heldQueues.delete(guildId);
-      const result = queueTracks(player, held);
-      const recovering = playbackFailures.get(guildId) || { times: [] };
-      recovering.status = 'recovering';
-      recovering.times = [];
-      recovering.retryAt = 0;
-      playbackFailures.set(guildId, recovering);
-      console.warn(`[source-protection] retrying ${result.added.length} preserved track(s) for ${guildId}`);
-      if (!result.added.length) return setHealthy(guildId);
       try {
-        await player.play();
+        await withGuildOperation(guildId, async () => {
+          if (music.players.get(guildId) !== player) return;
+          const result = queueTracks(player, held);
+          const recovering = playbackFailures.get(guildId) || { times: [] };
+          recovering.status = 'recovering';
+          recovering.times = [];
+          recovering.retryAt = 0;
+          playbackFailures.set(guildId, recovering);
+          console.warn(`[source-protection] retrying ${result.added.length} preserved track(s) for ${guildId}`);
+          if (!result.added.length) return setHealthy(guildId);
+          await player.play();
+          checkpointRecovery(player);
+        });
       } catch (error) {
         console.warn('[source-protection] retry failed to start', error?.message || error);
         openSourceCircuit(player, error?.message || 'retry failed');
@@ -214,6 +434,8 @@ export function createMusic(client, config, gemini) {
     // Force the failed current item to end only after the upcoming queue has
     // been moved aside. Kazagumo can then emit playerEmpty without burning
     // through the preserved queue.
+    scheduleRecoverySave(player, 0);
+
     if (stopCurrent) {
       try { if (player.queue.current) player.skip(); } catch { /* end event may already be in flight */ }
     }
@@ -285,6 +507,7 @@ export function createMusic(client, config, gemini) {
       invalidateQueueWork(player.guildId);
       setAutoplayMode(player.guildId, 'off');
       discardHeldQueue(player.guildId);
+      clearRecoverySession(player.guildId);
       try { player.queue.clear(); } catch { /* player may already be tearing down */ }
       try { await player.destroy(); } catch (error) { console.warn('[voice] auto-leave failed', error?.message || error); }
     }, EMPTY_VOICE_GRACE_MS);
@@ -336,6 +559,17 @@ export function createMusic(client, config, gemini) {
     void handlePlayerStart(player, track).catch((error) => console.warn('[player-start]', error?.message || error));
   });
 
+  music.on('queueUpdate', (player) => scheduleRecoverySave(player));
+
+  music.on('playerUpdate', (player) => {
+    const now = Date.now();
+    const last = recoveryPositionSavedAt.get(player.guildId) || 0;
+    if (now - last < RECOVERY_POSITION_SAVE_MS || !player.queue.current) return;
+    recoveryPositionSavedAt.set(player.guildId, now);
+    try { updateRecoveryPosition(player.guildId, Number(player.position || 0), Boolean(player.paused)); }
+    catch (error) { console.warn('[recovery] position checkpoint failed', error?.message || error); }
+  });
+
   music.on('playerException', (player, data) => {
     const message = data?.exception?.message || data?.message || 'track exception';
     console.warn('[player-exception]', player.guildId, message);
@@ -376,6 +610,7 @@ export function createMusic(client, config, gemini) {
       console.warn('[history] unable to record track', error?.message || error);
     }
     await setVoiceStatus(player, track);
+    scheduleRecoverySave(player, 0);
     evaluateVoiceOccupancy(player);
   }
 
@@ -403,7 +638,11 @@ export function createMusic(client, config, gemini) {
     });
     if (!filled && music.players.get(player.guildId) === player) {
       await clearVoiceStatus(player);
+      if (!player.queue.current && player.queue.isEmpty && !getHeldQueueCount(player.guildId)) clearRecoverySession(player.guildId);
+      else scheduleRecoverySave(player, 0);
       scheduleDisconnect(player);
+    } else if (filled) {
+      scheduleRecoverySave(player, 0);
     }
   }
 
@@ -414,6 +653,8 @@ export function createMusic(client, config, gemini) {
     clearDisconnect(player.guildId);
     clearEmptyVoiceTimer(player.guildId);
     clearSourceSuccess(player.guildId);
+    clearRecoverySaveTimer(player.guildId);
+    recoveryPositionSavedAt.delete(player.guildId);
     discardHeldQueue(player.guildId);
     await clearVoiceStatus(player);
     voiceIds.delete(player.guildId);
@@ -433,6 +674,12 @@ export function createMusic(client, config, gemini) {
       disconnectTimers.delete(player.guildId);
       const completelyIdle = !player.queue.current && player.queue.isEmpty && !player.playing && !player.paused;
       if (completelyIdle && music.players.get(player.guildId) === player) {
+        // A naturally finished healthy queue has nothing useful to recover. If
+        // the source circuit is still holding tracks, keep the SQLite recovery
+        // snapshot even if the idle player is eventually destroyed.
+        const health = getSourceHealth(player.guildId);
+        if (health.status === 'healthy' && !getHeldQueueCount(player.guildId)) clearRecoverySession(player.guildId);
+        else checkpointRecovery(player);
         player.destroy().catch((error) => console.warn('[idle-disconnect]', error?.message || error));
       }
     }, config.autoDisconnectMinutes * 60_000);
@@ -452,18 +699,36 @@ export function createMusic(client, config, gemini) {
 
     let player = music.players.get(interaction.guildId);
     if (!player) {
-      player = await music.createPlayer({
-        guildId: interaction.guildId,
-        textId: interaction.channelId,
-        voiceId: voice.id,
-        deaf: true,
-        volume: getStoredVolume(interaction.guildId, config.defaultVolume),
-      });
+      // Two slash commands can arrive while the voice connection is still being
+      // created. Collapse them onto one creation promise so we never race two
+      // Shoukaku/Kazagumo connections for the same guild.
+      let creating = playerCreationPromises.get(interaction.guildId);
+      if (!creating) {
+        creating = (async () => {
+          const existing = music.players.get(interaction.guildId);
+          if (existing) return existing;
+          return music.createPlayer({
+            guildId: interaction.guildId,
+            textId: interaction.channelId,
+            voiceId: voice.id,
+            deaf: true,
+            volume: getStoredVolume(interaction.guildId, config.defaultVolume),
+          });
+        })();
+        playerCreationPromises.set(interaction.guildId, creating);
+        creating.finally(() => {
+          if (playerCreationPromises.get(interaction.guildId) === creating) playerCreationPromises.delete(interaction.guildId);
+        }).catch(() => {});
+      }
+      player = await creating;
       if (player.voiceId) voiceIds.set(player.guildId, player.voiceId);
-    } else {
-      if (player.voiceId && player.voiceId !== voice.id) throw new Error('Join the same voice channel as the bot first.');
-      player.setTextChannel(interaction.channelId);
     }
+
+    // This check also handles two simultaneous first-use commands issued from
+    // different voice channels: whichever creates the player wins; the other
+    // request is rejected instead of silently moving the bot.
+    if (player.voiceId && player.voiceId !== voice.id) throw new Error('Join the same voice channel as the bot first.');
+    player.setTextChannel(interaction.channelId);
 
     clearEmptyVoiceTimer(player.guildId);
 
@@ -583,10 +848,14 @@ export function createMusic(client, config, gemini) {
       // or destroyed the player while network/AI searches were in flight.
       if (getAutoplayMode(player.guildId) !== mode || !queueRequestStillValid(player, revision)) return false;
       if (!tracks.length) return false;
-      const queued = queueTracks(player, tracks);
-      if (!queued.added.length) return false;
-      if (!player.playing && !player.paused) await player.play();
-      return true;
+      return withGuildOperation(player.guildId, async () => {
+        if (getAutoplayMode(player.guildId) !== mode || !queueRequestStillValid(player, revision)) return false;
+        const queued = queueTracks(player, tracks);
+        if (!queued.added.length) return false;
+        if (!player.playing && !player.paused) await player.play();
+        scheduleRecoverySave(player);
+        return true;
+      });
     } finally {
       autoplayLocks.delete(player.guildId);
     }
@@ -662,15 +931,21 @@ export function createMusic(client, config, gemini) {
 
     if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
     if (!picked.length) throw new Error('Could not build server radio from the available sources.');
-    const queued = queueTracks(player, picked);
-    if (!queued.added.length) throw new Error(`Queue is full (maximum ${MAX_UPCOMING_QUEUE} upcoming tracks).`);
-    if (!player.playing && !player.paused) await player.play();
-    return queued.added.length;
+    return withGuildOperation(player.guildId, async () => {
+      if (!queueRequestStillValid(player, revision)) throw queueCanceledError('Server radio was canceled because the queue changed.');
+      const queued = queueTracks(player, picked);
+      if (!queued.added.length) throw new Error(`Queue is full (maximum ${MAX_UPCOMING_QUEUE} upcoming tracks).`);
+      if (!player.playing && !player.paused) await player.play();
+      scheduleRecoverySave(player);
+      return queued.added.length;
+    });
   }
 
   function setGuildAutoplay(guildId, mode) {
     if (mode === 'ai' && !gemini?.enabled) throw new Error('Gemini is not configured, so AI autoplay cannot be enabled.');
     setAutoplayMode(guildId, mode);
+    const player = music.players.get(guildId);
+    if (player) scheduleRecoverySave(player);
     return mode;
   }
 
@@ -679,7 +954,10 @@ export function createMusic(client, config, gemini) {
   }
 
   function setGuildVolume(guildId, volume) {
-    return setStoredVolume(guildId, volume);
+    const saved = setStoredVolume(guildId, volume);
+    const player = music.players.get(guildId);
+    if (player) scheduleRecoverySave(player);
+    return saved;
   }
 
   return {
@@ -699,5 +977,12 @@ export function createMusic(client, config, gemini) {
     getSourceHealth,
     getHeldQueueCount,
     discardHeldQueue,
+    getHeldQueueSnapshot,
+    withGuildOperation,
+    checkpointRecovery,
+    checkpointAllRecoveries,
+    clearRecoverySession,
+    getRecoverableSession,
+    resumeRecoverySession,
   };
 }

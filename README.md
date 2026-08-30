@@ -36,11 +36,15 @@ Run:
 
 The response is visible only to you. It shows artwork, title, artist, duration, requester, Up Next, saved volume, loop, autoplay, and upcoming count.
 
-Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · More · Refresh
+Buttons: Previous · Loop · Pause/Resume · Shuffle · Skip · Queue · Clear · Stop · Autoplay · Vol- · Vol+ · Favorite · More · Refresh
 
-`Queue` opens a private Queue Manager with 25-track pages, a track selector, Remove, Move Next, Play Now, duplicate cleanup, and refresh/back controls. No extra public slash commands are added.
+`Queue` opens a private Queue Manager with 25-track pages, a track selector, Remove, Move Next, Play Now, stronger duplicate cleanup, and refresh/back controls. Clear/Remove/Dedupe keep one bounded **5-minute Undo** snapshot so accidental queue changes can be reversed without another service.
 
-`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek). The progress bar is a static snapshot and updates only when the private panel is refreshed, so there is no background message-update timer.
+`Favorite` saves/removes the currently displayed song from your personal SQLite favorites. The button is fingerprinted to the displayed track, so an old private panel cannot accidentally favorite a different song after the track changes.
+
+`More` opens private seek/replay controls (`-30s`, `-10s`, Replay, `+10s`, `+30s`, and exact seek), plus **Recent History** and **Favorites** browsers. The progress bar is a static snapshot and updates only when the private panel is refreshed, so there is no background message-update timer.
+
+For ambiguous text searches, `/play ... select:true` and `/playnext ... select:true` open a private top-5 result picker for 2 minutes. Direct URLs/playlists remain immediate. The picker is bounded in memory and has no background timer.
 
 The Discord voice-channel status is also updated to:
 
@@ -49,6 +53,25 @@ Playing: Song Title • Artist
 ```
 
 Grant the bot **Set Voice Channel Status** permission for this feature.
+
+---
+
+
+## Crash/restart recovery
+
+Live sessions are checkpointed to the existing local SQLite database with no Redis/MongoDB or extra process. The snapshot contains the current track, saved position, up to 300 upcoming/preserved tracks, volume, loop/autoplay state, and paused state. Position-only checkpoints are throttled to roughly every 15 seconds so the bot does not constantly rewrite the whole queue.
+
+Recovery is deliberately **opt-in**: after an unexpected bot/Windows restart, EZ Music never auto-joins a voice channel. Run `/status`; if a recent (under 24 hours) session exists, private **Resume Session** and **Discard Session** buttons appear. Join the voice channel where you want playback, then press Resume. The current track and an initial batch restore first; a larger saved queue resolves in guarded background batches.
+
+A clean Discord `/stop`, `/disconnect`, natural completed queue, or 2-minute empty-room auto-leave clears obsolete recovery state. Process shutdown/restart preserves a useful live session. During a prolonged source outage, held queue state remains recoverable instead of being discarded merely because the idle player later times out.
+
+## Lightweight library and race safety
+
+- **Recent History:** private browser over the existing bounded 5,000-entry server history, with Play / Play Next / Favorite actions.
+- **Favorites:** personal per-user favorites stored in SQLite; no additional daemon or cache.
+- **Stronger dedupe:** normalizes common upload labels such as Official Video/Audio, Lyrics, Topic and VEVO while keeping meaningful variants such as Live, Remix, Acoustic, Instrumental, Sped Up and Slowed distinct.
+- **Per-guild operation serialization:** destructive queue/playback changes are serialized so rapid button/command bursts cannot mutate the same queue concurrently.
+- **First-player creation guard:** simultaneous first-use commands share one voice-player creation promise, preventing duplicate Shoukaku/Kazagumo connection races.
 
 ---
 
@@ -183,7 +206,7 @@ Lavalink also enables `nonAllocatingFrameBuffer: true`, disables routine REST re
 
 - **Queue ceiling:** maximum 300 upcoming tracks; a single playlist adds at most 250.
 - **Empty-room auto-leave:** if no human listener remains in the bot voice channel for 2 minutes, the player disconnects and frees resources.
-- **Source circuit breaker:** three early playback/resolve failures inside 60 seconds pause automatic queue consumption, disable autoplay/loop, preserve remaining upcoming tracks in memory, and retry once after a cooldown instead of burning through the whole queue. A stable track for 20 seconds resets the failure window.
+- **Source circuit breaker:** three early playback/resolve failures inside 60 seconds pause automatic queue consumption, disable autoplay/loop, preserve remaining upcoming tracks in memory, and retry once after a cooldown instead of burning through the whole queue. A stable track for 20 seconds resets the failure window. Preserved tracks are also included in crash-recovery checkpoints.
 - **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.
 
 # Music sources
@@ -214,6 +237,8 @@ The built-in Lavalink YouTube source is disabled. Generic arbitrary HTTP-source 
 - Node RSS / heap usage
 - Lavalink JVM memory stats
 - playback-source health / preserved-queue protection state
+- recoverable-session controls when the bot is disconnected
+- private Recent History and Favorites entry points
 
 This avoids treating gateway ping as if it were the actual audio/voice latency.
 
@@ -257,10 +282,10 @@ Put a Google AI Studio API key in `GEMINI_API_KEY` and restart the bot.
 GitHub Actions validates:
 
 - syntax and regression tests on Windows and Ubuntu using Node 22.14.0
-- SQLite startup and persistent volume behavior
+- SQLite startup, persistent volume, favorites, history paging, and crash-recovery round trips
 - private/ephemeral interaction behavior
 - hidden-launcher/autostart safety checks
-- durable queue-clear/stop race guards
+- durable queue-clear/stop race guards, queue undo, search-picker bounds, and per-guild operation serialization
 - raw-audio filter policy
 - standalone Java 17 Lavalink 4.2.2 startup
 - YouTube plugin/source-manager loading through `/v4/info`

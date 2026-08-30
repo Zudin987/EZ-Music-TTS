@@ -12,6 +12,7 @@ import {
 import { formatDuration, truncate } from './utils.js';
 
 const QUEUE_PAGE_SIZE = 25;
+const LIBRARY_PAGE_SIZE = 20;
 
 function prettyLoop(loop) {
   if (loop === 'track') return 'Track';
@@ -48,8 +49,8 @@ function queueFingerprint(track) {
   return (hash >>> 0).toString(36);
 }
 
-function clampPage(total, page) {
-  const pages = Math.max(1, Math.ceil(Math.max(0, total) / QUEUE_PAGE_SIZE));
+function clampPage(total, page, pageSize) {
+  const pages = Math.max(1, Math.ceil(Math.max(0, total) / pageSize));
   return Math.max(0, Math.min(pages - 1, Number.parseInt(page, 10) || 0));
 }
 
@@ -66,7 +67,7 @@ function progressText(track, player) {
   return `\`${formatDuration(position)} ${bar} ${formatDuration(length)}\``;
 }
 
-export function playerButtons(player, autoplayMode = 'off') {
+export function playerButtons(player, autoplayMode = 'off', { canUndo = false } = {}) {
   const paused = Boolean(player?.paused);
   const hasCurrent = Boolean(player?.queue?.current);
   const upcoming = Number(player?.queue?.length || 0);
@@ -74,7 +75,7 @@ export function playerButtons(player, autoplayMode = 'off') {
   const volume = Math.round(Number(player?.volume || 0));
   const clearHasEffect = upcoming > 0 || player?.loop !== 'none' || autoplayMode !== 'off';
 
-  return [
+  const rows = [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('music:previous').setLabel('Previous').setEmoji('⏮️').setStyle(ButtonStyle.Secondary).setDisabled(!hasPrevious),
       new ButtonBuilder().setCustomId('music:loop').setLabel(`Loop: ${prettyLoop(player?.loop)}`).setEmoji('🔁').setStyle(ButtonStyle.Secondary),
@@ -91,10 +92,17 @@ export function playerButtons(player, autoplayMode = 'off') {
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('music:volume_down').setLabel('Vol -').setEmoji('🔉').setStyle(ButtonStyle.Secondary).setDisabled(volume <= 0),
       new ButtonBuilder().setCustomId('music:volume_up').setLabel('Vol +').setEmoji('🔊').setStyle(ButtonStyle.Secondary).setDisabled(volume >= 100),
+      new ButtonBuilder().setCustomId(`music:favorite:${hasCurrent ? queueFingerprint(player.queue.current) : 'none'}`).setLabel('Favorite').setEmoji('❤️').setStyle(ButtonStyle.Secondary).setDisabled(!hasCurrent),
       new ButtonBuilder().setCustomId('music:more').setLabel('More').setEmoji('⚙️').setStyle(ButtonStyle.Secondary).setDisabled(!hasCurrent),
       new ButtonBuilder().setCustomId('music:refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
     ),
   ];
+  if (canUndo) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('music:undo').setLabel('Undo Last Queue Change').setEmoji('↩️').setStyle(ButtonStyle.Primary),
+    ));
+  }
+  return rows;
 }
 
 export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
@@ -124,9 +132,9 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
   return embed;
 }
 
-export function queueManagerPayload(player, page = 0, selectedIndex = null, notice = null) {
+export function queueManagerPayload(player, page = 0, selectedIndex = null, notice = null, { canUndo = false } = {}) {
   const total = Number(player?.queue?.length || 0);
-  const safePage = clampPage(total, page);
+  const safePage = clampPage(total, page, QUEUE_PAGE_SIZE);
   const pages = Math.max(1, Math.ceil(total / QUEUE_PAGE_SIZE));
   const start = safePage * QUEUE_PAGE_SIZE;
   const pageTracks = [...(player?.queue || [])].slice(start, start + QUEUE_PAGE_SIZE);
@@ -171,13 +179,24 @@ export function queueManagerPayload(player, page = 0, selectedIndex = null, noti
       new ButtonBuilder().setCustomId(`music:qplay:${selectedIndex}:${safePage}:${queueFingerprint(selected)}`).setLabel('Play Now').setEmoji('▶️').setStyle(ButtonStyle.Primary),
     ));
   }
+  if (canUndo) {
+    components.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('music:undo').setLabel('Undo Last Queue Change').setEmoji('↩️').setStyle(ButtonStyle.Primary),
+    ));
+  }
 
   return { content: lines.join('\n'), embeds: [], components };
 }
 
+export function undoButtonComponents() {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('music:undo').setLabel('Undo Last Queue Change').setEmoji('↩️').setStyle(ButtonStyle.Primary),
+  )];
+}
+
 export function playbackToolsPayload(player, autoplayMode = 'off', notice = null) {
   const track = player?.queue?.current;
-  if (!track) return { content: 'Nothing is playing.', embeds: [], components: [] };
+  if (!track) return { content: 'Nothing is playing.', embeds: [], components: statusButtons() };
   const seekable = track?.isSeekable !== false && !track?.isStream;
   const rawPosition = Number(player?.position || 0);
   const position = Number.isFinite(rawPosition) ? Math.max(0, rawPosition) : 0;
@@ -196,6 +215,8 @@ export function playbackToolsPayload(player, autoplayMode = 'off', notice = null
       ),
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('music:seekmodal').setLabel('Seek…').setEmoji('🎯').setStyle(ButtonStyle.Secondary).setDisabled(!seekable),
+        new ButtonBuilder().setCustomId('music:history').setLabel('History').setEmoji('🕘').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('music:favorites').setLabel('Favorites').setEmoji('❤️').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('music:more_refresh').setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('music:back').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
       ),
@@ -216,6 +237,97 @@ export function seekModal() {
     .setCustomId('music:seeksubmit')
     .setTitle('Seek in current song')
     .addComponents(new ActionRowBuilder().addComponents(input));
+}
+
+export function searchPickerPayload(token, tracks, mode = 'play') {
+  const choices = (tracks || []).slice(0, 5);
+  const label = mode === 'next' ? 'Play Next' : 'Play';
+  if (!choices.length) return { content: 'No selectable results found.', embeds: [], components: [] };
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`music:spick:${token}`)
+    .setPlaceholder(`${label}: choose the exact result`)
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addOptions(choices.map((track, index) => ({
+      label: truncate(`${index + 1}. ${String(track?.title || 'Unknown title')}`, 100),
+      description: truncate(`${String(track?.author || 'Unknown')} • ${formatDuration(track?.length || 0)}`, 100),
+      value: String(index),
+    })));
+  return {
+    content: `**🔎 Choose a result** • ${label}\nThis picker expires in 2 minutes.`,
+    embeds: [],
+    components: [
+      new ActionRowBuilder().addComponents(menu),
+      new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`music:spcancel:${token}`).setLabel('Cancel').setEmoji('✖️').setStyle(ButtonStyle.Secondary)),
+    ],
+  };
+}
+
+function libraryPayload(kind, rows, total, page = 0, selectedId = null, notice = null) {
+  const safePage = clampPage(total, page, LIBRARY_PAGE_SIZE);
+  const pages = Math.max(1, Math.ceil(Math.max(0, total) / LIBRARY_PAGE_SIZE));
+  const selected = rows.find((row) => Number(row.id) === Number(selectedId));
+  const isFavorite = kind === 'favorites';
+  const prefix = isFavorite ? 'f' : 'h';
+  const title = isFavorite ? '❤️ Your Favorites' : '🕘 Recent Server History';
+  const lines = [`**${title}**`, `Items: **${total}** • Page **${safePage + 1}/${pages}**`];
+  if (selected) lines.push(`Selected: **${safeText(selected.title, 70)}** — ${safeText(selected.author, 35)}`);
+  if (notice) lines.push('', safeText(notice, 600));
+  if (!rows.length) lines.push('', isFavorite ? 'No favorites saved yet.' : 'No recent listening history yet.');
+
+  const components = [];
+  if (rows.length) {
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`music:${prefix}select:${safePage}`)
+        .setPlaceholder(isFavorite ? 'Choose a favorite' : 'Choose a recent track')
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(rows.map((row) => ({
+          label: truncate(String(row.title || 'Unknown title'), 100),
+          description: truncate(`${String(row.author || 'Unknown')} • ${formatDuration(row.duration_ms || row.length || 0)}`, 100),
+          value: String(row.id),
+        }))),
+    ));
+  }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`music:${prefix}page:${safePage - 1}`).setLabel('Prev').setEmoji('◀️').setStyle(ButtonStyle.Secondary).setDisabled(safePage <= 0),
+    new ButtonBuilder().setCustomId(`music:${prefix}page:${safePage + 1}`).setLabel('Next').setEmoji('▶️').setStyle(ButtonStyle.Secondary).setDisabled(safePage >= pages - 1),
+    new ButtonBuilder().setCustomId(`music:${prefix}refresh:${safePage}`).setLabel('Refresh').setEmoji('♻️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('music:libraryback').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  ));
+  if (selected) {
+    const actionRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`music:${prefix}play:${selected.id}:${safePage}${isFavorite ? `:${queueFingerprint(selected)}` : ''}`).setLabel('Play').setEmoji('▶️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`music:${prefix}next:${selected.id}:${safePage}${isFavorite ? `:${queueFingerprint(selected)}` : ''}`).setLabel('Play Next').setEmoji('⬆️').setStyle(ButtonStyle.Secondary),
+    );
+    if (isFavorite) actionRow.addComponents(new ButtonBuilder().setCustomId(`music:fremove:${selected.id}:${safePage}:${queueFingerprint(selected)}`).setLabel('Remove Favorite').setEmoji('💔').setStyle(ButtonStyle.Danger));
+    else actionRow.addComponents(new ButtonBuilder().setCustomId(`music:hfavorite:${selected.id}:${safePage}`).setLabel('Favorite').setEmoji('❤️').setStyle(ButtonStyle.Secondary));
+    components.push(actionRow);
+  }
+  return { content: lines.join('\n'), embeds: [], components };
+}
+
+export function historyPayload(rows, total, page = 0, selectedId = null, notice = null) {
+  return libraryPayload('history', rows, total, page, selectedId, notice);
+}
+
+export function favoritesPayload(rows, total, page = 0, selectedId = null, notice = null) {
+  return libraryPayload('favorites', rows, total, page, selectedId, notice);
+}
+
+export function statusButtons({ hasRecovery = false } = {}) {
+  const rows = [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('music:history').setLabel('Recent History').setEmoji('🕘').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('music:favorites').setLabel('Favorites').setEmoji('❤️').setStyle(ButtonStyle.Secondary),
+  )];
+  if (hasRecovery) {
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('music:recovery_resume').setLabel('Resume Session').setEmoji('▶️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('music:recovery_discard').setLabel('Discard Session').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+    ));
+  }
+  return rows;
 }
 
 export function queueText(player, max = 20, maxChars = 1850) {

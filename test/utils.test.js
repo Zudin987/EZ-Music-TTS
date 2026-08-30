@@ -21,8 +21,16 @@ test('truncate and URL detection', () => {
   assert.equal(isUrl('song name'), false);
 });
 
-test('trackKey normalizes metadata and rejects blank tracks', () => {
-  assert.equal(trackKey({ author: ' Artist ', title: ' Song ' }), 'artist\u0000song');
+test('trackKey normalizes upload labels but preserves meaningful song variants', () => {
+  assert.equal(trackKey({ author: ' Artist ', title: ' Song ' }), 'meta:artist\u0000song');
+  assert.equal(
+    trackKey({ author: 'Artist - Topic', title: 'Song (Official Audio)' }),
+    trackKey({ author: 'ArtistVEVO', title: 'Song [Official Video]' }),
+  );
+  assert.notEqual(
+    trackKey({ author: 'Artist', title: 'Song (Live)' }),
+    trackKey({ author: 'Artist', title: 'Song' }),
+  );
   assert.equal(trackKey({ author: '', title: '' }), '');
 });
 
