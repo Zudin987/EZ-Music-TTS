@@ -1,0 +1,55 @@
+name: Apply v0.1.7 Audit Hardening
+
+on:
+  push:
+    branches:
+      - audit/v017-hardening
+    paths:
+      - .github/workflows/audit-v017-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: audit/v017-hardening
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - name: Apply audited patch
+        run: python3 tools/audit_v017_patch.py
+      - name: Generate lockfile
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Install exact dependency tree
+        run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: Test
+        run: npm test
+      - name: Verify low-memory invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+      - name: Commit product changes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden v0.1.7 audit findings'
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin HEAD:audit/v017-hardening
