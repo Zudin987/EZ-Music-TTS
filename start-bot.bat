@@ -2,10 +2,12 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-set "LAVALINK_JAR=%CD%\lavalink\Lavalink.jar"
-set "LAVALINK_PID=%CD%\lavalink\lavalink.pid"
-set "LAVALINK_LOG=%CD%\lavalink\lavalink.log"
-set "LAVALINK_ERROR_LOG=%CD%\lavalink\lavalink-error.log"
+set "EZ_MUSIC_ROOT=%CD%"
+set "LAVALINK_WORK=%CD%\lavalink"
+set "LAVALINK_JAR=%LAVALINK_WORK%\Lavalink.jar"
+set "LAVALINK_PID=%LAVALINK_WORK%\lavalink.pid"
+set "LAVALINK_LOG=%LAVALINK_WORK%\lavalink.log"
+set "LAVALINK_ERROR_LOG=%LAVALINK_WORK%\lavalink-error.log"
 
 if not exist .env (
   echo [ERROR] .env is missing. Run setup.bat first.
@@ -76,11 +78,11 @@ if not errorlevel 1 (
 )
 
 if exist "%LAVALINK_PID%" del /q "%LAVALINK_PID%" >nul 2>nul
-if exist "%LAVALINK_LOG%" move /Y "%LAVALINK_LOG%" "%CD%\lavalink\lavalink-old.log" >nul 2>nul
-if exist "%LAVALINK_ERROR_LOG%" move /Y "%LAVALINK_ERROR_LOG%" "%CD%\lavalink\lavalink-error-old.log" >nul 2>nul
+if exist "%LAVALINK_LOG%" move /Y "%LAVALINK_LOG%" "%LAVALINK_WORK%\lavalink-old.log" >nul 2>nul
+if exist "%LAVALINK_ERROR_LOG%" move /Y "%LAVALINK_ERROR_LOG%" "%LAVALINK_WORK%\lavalink-error-old.log" >nul 2>nul
 
 echo Starting native Lavalink (no Docker)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$work=Join-Path $env:CD 'lavalink'; $out=Join-Path $work 'lavalink.log'; $err=Join-Path $work 'lavalink-error.log'; $pidFile=Join-Path $work 'lavalink.pid'; $p=Start-Process -FilePath 'java' -ArgumentList '-Xms128M','-Xmx512M','-jar','Lavalink.jar' -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii; Write-Host ('Lavalink PID: '+$p.Id)" || (
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$work=$env:LAVALINK_WORK; if([string]::IsNullOrWhiteSpace($work)){throw 'LAVALINK_WORK is not set'}; $out=$env:LAVALINK_LOG; $err=$env:LAVALINK_ERROR_LOG; $pidFile=$env:LAVALINK_PID; $p=Start-Process -FilePath 'java' -ArgumentList '-Xms128M','-Xmx512M','-jar','Lavalink.jar' -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii; Write-Host ('Lavalink PID: '+$p.Id)" || (
   echo [ERROR] Could not start Lavalink.
   pause
   exit /b 1
