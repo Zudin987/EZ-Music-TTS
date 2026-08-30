@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { createMusic } from './music.js';
 import { createInteractionHandler, registerGuildCommands } from './commands.js';
@@ -12,7 +12,7 @@ const client = new Client({
 const gemini = new GeminiDJ(config.geminiApiKey, config.geminiModel);
 const playerApi = createMusic(client, config, gemini);
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
   console.log(`[discord] logged in as ${client.user.tag}`);
   try { await registerGuildCommands(config); }
   catch (error) { console.error('[discord] command registration failed', error); }
