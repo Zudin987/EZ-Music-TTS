@@ -102,7 +102,7 @@ if exist "%LAVALINK_LOG%" move /Y "%LAVALINK_LOG%" "%LAVALINK_WORK%\lavalink-old
 if exist "%LAVALINK_ERROR_LOG%" move /Y "%LAVALINK_ERROR_LOG%" "%LAVALINK_WORK%\lavalink-error-old.log" >nul 2>nul
 
 echo Starting native Lavalink (no Docker)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$work=$env:LAVALINK_WORK; if([string]::IsNullOrWhiteSpace($work)){throw 'LAVALINK_WORK is not set'}; $out=$env:LAVALINK_LOG; $err=$env:LAVALINK_ERROR_LOG; $pidFile=$env:LAVALINK_PID; $p=Start-Process -FilePath 'java' -ArgumentList '-Xms128M','-Xmx512M','-jar','Lavalink.jar' -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii; Write-Host ('Lavalink PID: '+$p.Id)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$work=$env:LAVALINK_WORK; if([string]::IsNullOrWhiteSpace($work)){throw 'LAVALINK_WORK is not set'}; $out=$env:LAVALINK_LOG; $err=$env:LAVALINK_ERROR_LOG; $pidFile=$env:LAVALINK_PID; $p=Start-Process -FilePath 'java' -ArgumentList '-Xms64M','-Xmx256M','-jar','Lavalink.jar' -WorkingDirectory $work -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $pidFile -Value $p.Id -Encoding ascii; Write-Host ('Lavalink PID: '+$p.Id)"
 if errorlevel 1 (
   echo [ERROR] Could not start Lavalink.
   call :maybe_pause
@@ -131,7 +131,7 @@ echo Lavalink is ready.
 echo Starting EZ Music...
 if "%HIDDEN%"=="0" echo Press Ctrl+C to stop the Discord bot.
 echo.
-node "%CD%\src\index.js"
+node --max-old-space-size=128 "%CD%\src\index.js"
 set "BOT_EXIT=%ERRORLEVEL%"
 
 if exist "%STOP_REQUEST%" (
