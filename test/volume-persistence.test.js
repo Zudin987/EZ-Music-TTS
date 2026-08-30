@@ -31,7 +31,7 @@ test('volume is persisted independently from autoplay settings', async () => {
 
 test('volume command works without creating a player and status reports saved volume', () => {
   assert.match(commands, /if \(name === 'volume'\)[\s\S]*music\.players\.get\(interaction\.guildId\)[\s\S]*setGuildVolume\(interaction\.guildId, n\)/);
-  assert.match(commands, /Volume: \*\*\$\{volume\}%\*\*/);
+  assert.match(commands, /Saved volume: \*\*\$\{volume\}%\*\*/);
   assert.match(music, /volume: getStoredVolume\(interaction\.guildId, config\.defaultVolume\)/);
 });
 
