@@ -38,14 +38,24 @@ const TITLE_VARIANT_PATTERNS = [
 ];
 
 // Some alternate-version uploaders leave the title completely clean, e.g.
-// "Heavy Serenade — Shin Giwon Piano". These source-name hints are strong
-// enough to down-rank unless the user explicitly includes the same intent.
+// "Heavy Serenade — Shin Giwon Piano" or a broadcast channel whose title is
+// only the song name plus Korean broadcast text. These source-name hints are
+// strong enough to down-rank unless the user explicitly includes the same intent.
 const AUTHOR_VARIANT_PATTERNS = [
   ['cover'],
   ['karaoke'],
   ['instrumental'],
   ['piano'],
   ['tribute'],
+  ['performance'],
+  ['stage'],
+  ['fancam'],
+  ['musiccore'],
+  ['inkigayo'],
+  ['countdown'],
+  ['music', 'bank'],
+  ['dance', 'practice'],
+  ['choreography'],
 ];
 
 function rawTokens(value) {
