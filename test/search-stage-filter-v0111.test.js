@@ -21,6 +21,19 @@ test('broadcast/stage versions are rejected for a plain song query', () => {
   for (const title of variants) assert.ok(searchTrackScore('Heavy Serenade', track(title)) < SEARCH_MATCH_THRESHOLD, title);
 });
 
+test('broadcast/stage uploader names are rejected even when the title is clean', () => {
+  const variants = [
+    ['Heavy Serenade - NMIXX | SBS 260517 방송', 'SBSKPOP X INKIGAYO'],
+    ['NMIXX - Heavy Serenade', 'M Countdown'],
+    ['NMIXX - Heavy Serenade', 'Show MusicCore'],
+    ['NMIXX - Heavy Serenade', 'Music Bank'],
+    ['NMIXX - Heavy Serenade', 'Official Fancam'],
+  ];
+  for (const [title, author] of variants) {
+    assert.ok(searchTrackScore('Heavy Serenade', track(title, author)) < SEARCH_MATCH_THRESHOLD, `${title} — ${author}`);
+  }
+});
+
 test('promo/trailer versions are rejected for a plain song query', () => {
   const variants = [
     'NMIXX Heavy Serenade Trailer',
@@ -51,4 +64,5 @@ test('alternate variants remain valid when explicitly requested', () => {
   assert.ok(searchTrackScore('Heavy Serenade stage', track('NMIXX Heavy Serenade Stage')) >= SEARCH_MATCH_THRESHOLD);
   assert.ok(searchTrackScore('Heavy Serenade edit', track('NMIXX Heavy Serenade Edit')) >= SEARCH_MATCH_THRESHOLD);
   assert.ok(searchTrackScore('Heavy Serenade trailer', track('NMIXX Heavy Serenade Trailer')) >= SEARCH_MATCH_THRESHOLD);
+  assert.ok(searchTrackScore('Heavy Serenade inkigayo', track('Heavy Serenade - NMIXX', 'SBSKPOP X INKIGAYO')) >= SEARCH_MATCH_THRESHOLD);
 });
