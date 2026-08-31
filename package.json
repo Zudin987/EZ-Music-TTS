@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@google/genai": "2.19.0",
-    "better-sqlite3": "13.0.3",
+    "better-sqlite3": "12.11.1",
     "discord.js": "14.27.0",
     "dotenv": "17.4.2",
     "kazagumo": "3.4.3",
