@@ -18,6 +18,7 @@ import { emptyVoiceTransition } from './performance.js';
 import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQueries, playbackFallbackQuery, restoreFallbackQueue, takeFallbackQueueHold, youtubeTrackId } from './playback-fallback.js';
 import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';
 import { activeTrackMatchesCurrent } from './playback-start.js';
+import { setPlayerPaused, stopPlayerTrack } from './player-control.js';
 import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
 
 const MAX_UPCOMING_QUEUE = 300;
@@ -449,7 +450,7 @@ export function createMusic(client, config, gemini) {
         const volume = Math.max(0, Math.min(100, Number(session.volumePercent ?? getStoredVolume(player.guildId, config.defaultVolume))));
         await player.setVolume(volume);
         setStoredVolume(player.guildId, Math.round(volume));
-        if (session.paused) player.pause(true);
+        if (session.paused) await setPlayerPaused(player, true);
         scheduleRecoverySave(player, 0);
       });
 
@@ -629,7 +630,7 @@ export function createMusic(client, config, gemini) {
     scheduleRecoverySave(player, 0);
 
     if (stopCurrent) {
-      try { if (player.queue.current) player.skip(); } catch { /* end event may already be in flight */ }
+      if (player.queue.current) void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));
     }
     scheduleSourceRetry(player);
   }
@@ -658,9 +659,9 @@ export function createMusic(client, config, gemini) {
       try {
         if (player.queue.current) {
           if (player.loop !== 'none') player.setLoop('none');
-          player.skip();
+          void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));
         }
-      } catch (error) { console.warn('[source-protection] skip failed', error?.message || error); }
+      } catch (error) { console.warn('[source-protection] stop scheduling failed', error?.message || error); }
     }
     return state;
   }
@@ -748,7 +749,7 @@ export function createMusic(client, config, gemini) {
 
     if (failedStillCurrent && player.queue.current) {
       if (player.loop !== 'none') player.setLoop('none');
-      player.skip();
+      await stopPlayerTrack(player);
     } else if (player.queue.current && !player.playing && !player.paused && !player.shoukaku?.paused) {
       await player.play();
     }
@@ -928,7 +929,7 @@ export function createMusic(client, config, gemini) {
     }));
   }
 
-  function evaluateVoiceOccupancy(player) {
+  async function evaluateVoiceOccupancy(player) {
     if (!player || music.players.get(player.guildId) !== player) return;
     const guildId = player.guildId;
     const hasHuman = hasHumanListener(player);
@@ -945,10 +946,12 @@ export function createMusic(client, config, gemini) {
       const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);
       if (transition === 'resume' && wasAutoPaused) {
         try {
-          player.pause(false);
+          await setPlayerPaused(player, false);
           scheduleRecoverySave(player, 0);
           console.log(`[voice] human listener returned; auto-resumed ${guildId}`);
+          if (!hasHumanListener(player)) await evaluateVoiceOccupancy(player);
         } catch (error) {
+          emptyVoiceAutoPaused.add(guildId);
           console.warn('[voice] auto-resume failed', error?.message || error);
         }
       }
@@ -957,11 +960,18 @@ export function createMusic(client, config, gemini) {
 
     if (transition === 'pause') {
       try {
-        player.pause(true);
+        await setPlayerPaused(player, true);
+        if (hasHumanListener(player)) {
+          await setPlayerPaused(player, false);
+          emptyVoiceAutoPaused.delete(guildId);
+          scheduleRecoverySave(player, 0);
+          return;
+        }
         emptyVoiceAutoPaused.add(guildId);
         scheduleRecoverySave(player, 0);
         console.log(`[voice] channel empty; auto-paused ${guildId}`);
       } catch (error) {
+        emptyVoiceAutoPaused.delete(guildId);
         console.warn('[voice] auto-pause failed', error?.message || error);
       }
     }
@@ -970,7 +980,7 @@ export function createMusic(client, config, gemini) {
     const timer = setTimeout(async () => {
       emptyVoiceTimers.delete(guildId);
       if (music.players.get(guildId) !== player || hasHumanListener(player)) {
-        evaluateVoiceOccupancy(player);
+        await evaluateVoiceOccupancy(player);
         return;
       }
       emptyVoiceAutoPaused.delete(guildId);
@@ -992,7 +1002,7 @@ export function createMusic(client, config, gemini) {
     if (!player) return;
     const voiceId = player.voiceId || voiceIds.get(guildId);
     if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
-    evaluateVoiceOccupancy(player);
+    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
   });
 
   function lavalinkBaseUrl() {
@@ -1212,7 +1222,7 @@ export function createMusic(client, config, gemini) {
     stagePlaybackHistory(player, track);
     await setVoiceStatus(player, track);
     scheduleRecoverySave(player, 0);
-    evaluateVoiceOccupancy(player);
+    await evaluateVoiceOccupancy(player);
   }
 
   async function handlePlayerEmpty(player) {
