@@ -31,3 +31,5 @@ jobs:
           grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
           grep -q -- '-Xmx256M' start-bot.bat
           grep -q -- '--max-old-space-size=128' start-bot.bat
+
+# Final rerun after detecting alternate-version signals in uploader names.
