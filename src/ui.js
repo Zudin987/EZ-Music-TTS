@@ -341,22 +341,25 @@ export function seekModal() {
     .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
-export function searchPickerPayload(token, tracks, mode = 'play') {
-  const choices = (tracks || []).slice(0, 5);
+export function searchPickerPayload(token, tracks, mode = 'play', hints = []) {
+  const choices = (tracks || []).slice(0, 3);
   const label = mode === 'next' ? 'Play Next' : 'Play';
   if (!choices.length) return { content: 'No selectable results found.', embeds: [], components: [] };
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`music:spick:${token}`)
-    .setPlaceholder(`${label}: choose the exact result`)
+    .setPlaceholder(`${label}: choose 1 of ${choices.length}`)
     .setMinValues(1)
     .setMaxValues(1)
-    .addOptions(choices.map((track, index) => ({
-      label: truncate(`${index + 1}. ${String(track?.title || 'Unknown title')}`, 100),
-      description: truncate(`${String(track?.author || 'Unknown')} • ${formatDuration(track?.length || 0)}`, 100),
-      value: String(index),
-    })));
+    .addOptions(choices.map((track, index) => {
+      const hint = String(hints?.[index] || '').trim();
+      return {
+        label: truncate(`${index + 1}. ${String(track?.title || 'Unknown title')}`, 100),
+        description: truncate(`${hint ? `[${hint}] ` : ''}${String(track?.author || 'Unknown')} • ${formatDuration(track?.length || 0)}`, 100),
+        value: String(index),
+      };
+    }));
   return {
-    content: `**🔎 Choose a result** • ${label}\nThis picker expires in 2 minutes.`,
+    content: `**🔎 Choose a result** • ${label}\nTyped searches wait for your choice. **Lyrics/Audio are preferred over M/V** when they match. Picker expires in 2 minutes.`,
     embeds: [],
     components: [
       new ActionRowBuilder().addComponents(menu),

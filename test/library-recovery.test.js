@@ -25,11 +25,13 @@ test('crash recovery is SQLite-backed and opt-in instead of auto-joining voice',
   assert.doesNotMatch(index, /resumeRecoverySession\(/);
 });
 
-test('search picker is opt-in and temporary', () => {
-  assert.match(commands, /setName\('select'\)/);
+test('typed search picker is default, bounded, temporary, and revision-safe', () => {
+  assert.doesNotMatch(commands, /setName\('select'\)/);
+  assert.match(commands, /shouldOfferSearchChoices\(query\)/);
+  assert.match(commands, /resolveSearchChoices\(music, query, interaction\.user, \{ limit: 3 \}\)/);
   assert.match(searchPicker, /SEARCH_PICKER_TTL_MS = 120_000/);
   assert.match(searchPicker, /SEARCH_PICKER_MAX = 32/);
-  assert.match(searchPicker, /tracks: Array\.isArray\(tracks\) \? tracks\.slice\(0, 5\)/);
+  assert.match(searchPicker, /tracks: Array\.isArray\(tracks\) \? tracks\.slice\(0, 3\)/);
   assert.match(searchPicker, /revision:/);
   assert.match(commands, /isQueueRevisionCurrent\(interaction\.guildId, entry\.revision\)/);
 });

@@ -89,12 +89,14 @@ test('private queue text stays under Discord message limit', () => {
 });
 
 
-test('search picker is private-component friendly and bounded to five choices', () => {
+test('search picker is private-component friendly and bounded to three choices', () => {
   const tracks = Array.from({ length: 8 }, (_, i) => fakeTrack(i + 1));
-  const payload = searchPickerPayload('abc123', tracks, 'play');
+  const payload = searchPickerPayload('abc123', tracks, 'play', ['Lyrics', 'Music', 'M/V']);
   const json = JSON.stringify(payload.components.map((row) => row.toJSON()));
   assert.match(json, /music:spick:abc123/);
-  assert.equal(payload.components[0].components[0].options.length, 5);
+  assert.equal(payload.components[0].components[0].options.length, 3);
+  assert.match(json, /\[Lyrics\]/);
+  assert.match(json, /\[M\/V\]/);
 });
 
 test('history and favorites browsers expose lightweight play actions', () => {
