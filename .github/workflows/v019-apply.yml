@@ -1,0 +1,43 @@
+name: Verify v0.1.9 fixes
+
+on:
+  push:
+    branches:
+      - fix/v019-search-start-nowplaying
+    paths:
+      - .github/workflows/v019-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/v019-search-start-nowplaying
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+      - name: Apply focused patch
+        run: node scripts/apply-v019.mjs
+      - name: Refresh lockfile
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Locked clean install
+        run: npm ci
+      - name: Syntax checks
+        run: npm run check
+      - name: Regression tests
+        run: npm test
+      - name: Commit verified product changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md package.json package-lock.json src/commands.js src/source-routing.js src/ui.js
+          git commit -m "fix: improve search matching and idle playback start"
+          git push origin HEAD:fix/v019-search-start-nowplaying
