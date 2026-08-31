@@ -22,6 +22,16 @@ export function voiceCloseDisposition(code) {
   return 'watch';
 }
 
+export function voiceChannelTransition(oldChannelId, newChannelId) {
+  const from = oldChannelId ? String(oldChannelId) : null;
+  const to = newChannelId ? String(newChannelId) : null;
+  if (from === to) return { kind: 'none', from, to };
+  if (!from && to) return { kind: 'joined', from, to };
+  if (from && !to) return { kind: 'left', from, to };
+  if (from && to) return { kind: 'moved', from, to };
+  return { kind: 'none', from, to };
+}
+
 function eventEncoded(track) {
   return String(track?.encoded || track?.track || '').trim();
 }
