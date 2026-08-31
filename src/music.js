@@ -19,7 +19,7 @@ import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentialles
 import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';
 import { activeTrackMatchesCurrent } from './playback-start.js';
 import { setPlayerPaused, stopPlayerTrack } from './player-control.js';
-import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
+import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceChannelTransition, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -1000,6 +1000,35 @@ export function createMusic(client, config, gemini) {
     const guildId = newState.guild?.id || oldState.guild?.id;
     const player = guildId ? music.players.get(guildId) : null;
     if (!player) return;
+
+    // Shoukaku consumes raw VOICE_STATE_UPDATE packets and follows external bot
+    // moves, but Kazagumo's wrapper voiceId is not updated by that path. Keep EZ's
+    // wrapper/cache synchronized with the state Discord already accepted instead
+    // of sending a second move request back to Discord.
+    if (oldState.id === client.user?.id) {
+      const botTransition = voiceChannelTransition(oldState.channelId, newState.channelId);
+      if (botTransition.kind === 'left') {
+        void retirePlayerForTransportLoss(player, 'Discord moved bot out of voice').catch((error) => {
+          console.warn('[voice] external disconnect cleanup failed', error?.message || error);
+        });
+        return;
+      }
+      if (botTransition.kind === 'moved' || botTransition.kind === 'joined') {
+        const previousVoiceId = botTransition.from;
+        player.voiceId = botTransition.to;
+        voiceIds.set(guildId, botTransition.to);
+        clearVoiceCloseRecoveryTimer(guildId);
+        scheduleRecoverySave(player, 0);
+
+        if (previousVoiceId && previousVoiceId !== botTransition.to) {
+          void client.rest.put(`/channels/${previousVoiceId}/voice-status`, { body: { status: null } }).catch(() => {});
+        }
+        if (player.queue.current) void setVoiceStatus(player, player.queue.current);
+        void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
+        return;
+      }
+    }
+
     const voiceId = player.voiceId || voiceIds.get(guildId);
     if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
     void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
