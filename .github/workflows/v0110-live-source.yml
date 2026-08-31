@@ -1,0 +1,101 @@
+name: Live-check v0.1.10 source routing
+
+on:
+  push:
+    branches:
+      - fix/v0110-search-playback-fallback
+    paths:
+      - .github/workflows/v0110-live-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  live-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/v0110-search-playback-fallback
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Start production-profile Lavalink
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 \
+            https://github.com/lavalink-devs/Lavalink/releases/download/4.2.2/Lavalink.jar \
+            -o lavalink/Lavalink.jar
+          echo '8cb801e591072c3689fafd71ccf571a95a4ead3cc35dfc045e157d763d89119a  lavalink/Lavalink.jar' | sha256sum -c -
+          cd lavalink
+          java -Xms64M -Xmx256M -jar Lavalink.jar > ../lavalink-v0110.log 2>&1 &
+          echo $! > ../lavalink-v0110.pid
+          cd ..
+          ready=0
+          for attempt in {1..90}; do
+            if curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/version >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 200 lavalink-v0110.log >&2 || true
+            exit 1
+          fi
+      - name: Resolve exact reported query through real sources
+        run: |
+          node --input-type=module <<'NODE'
+          import { resolvePreferredSearch } from './src/source-routing.js';
+          const calls = [];
+          const target = {
+            async search(query, options = {}) {
+              const identifier = options.source ? `${options.source}${query}` : query;
+              calls.push(identifier);
+              const url = new URL('http://127.0.0.1:2333/v4/loadtracks');
+              url.searchParams.set('identifier', identifier);
+              const response = await fetch(url, { headers: { Authorization: 'ezmusic-local-only' } });
+              if (!response.ok) throw new Error(`Lavalink ${response.status}`);
+              const body = await response.json();
+              const raw = body.loadType === 'search' ? body.data : body.loadType === 'track' ? [body.data] : [];
+              return {
+                type: body.loadType === 'search' ? 'SEARCH' : body.loadType?.toUpperCase?.() || 'EMPTY',
+                tracks: raw.map((item) => ({ ...(item.info || {}), encoded: item.encoded })),
+              };
+            },
+          };
+          const result = await resolvePreferredSearch(target, 'Heavy Serenade', null);
+          const first = result?.tracks?.[0];
+          if (!first) throw new Error('No Heavy Serenade result survived routing');
+          const combined = `${first.title || ''} ${first.author || ''}`;
+          if (!/heavy/i.test(first.title || '') || !/serenade/i.test(first.title || '')) {
+            throw new Error(`Wrong title selected: ${first.title} — ${first.author}`);
+          }
+          if (!/nmixx|jyp/i.test(combined)) {
+            throw new Error(`Ambiguous/unrelated uploader still won: ${first.title} — ${first.author}`);
+          }
+          if (calls[0] !== 'ytmsearch:Heavy Serenade' || calls[1] !== 'ytsearch:Heavy Serenade') {
+            throw new Error(`Expected ambiguity comparison YTM -> YouTube, got ${calls.join(' -> ')}`);
+          }
+          console.log(`selected: ${first.title} — ${first.author}`);
+          console.log(`uri: ${first.uri}`);
+          console.log(`routes: ${calls.join(' -> ')}`);
+          NODE
+      - name: Confirm official video metadata loads
+        run: |
+          set -euo pipefail
+          body="$(curl -fsSG -H 'Authorization: ezmusic-local-only' --data-urlencode 'identifier=https://www.youtube.com/watch?v=6Ycn9qZK09I' http://127.0.0.1:2333/v4/loadtracks)"
+          printf '%s' "$body" | grep -q 'Heavy Serenade'
+      - name: Stop Lavalink
+        if: always()
+        run: |
+          if [ -f lavalink-v0110.pid ]; then kill "$(cat lavalink-v0110.pid)" 2>/dev/null || true; fi
+      - name: Show log on failure
+        if: failure()
+        run: tail -n 200 lavalink-v0110.log || true
