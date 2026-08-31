@@ -120,6 +120,13 @@ test('manual pause is not implicitly resumed by queue activity', async () => {
   assert.equal(player.playCalls, 0);
 });
 
+test('queued-only paused state is never implicitly started', async () => {
+  const player = playerMock({ current: null, upcoming: [track('Heavy Serenade', 'NMIXX')], paused: true, llTrack: null });
+  const state = await ensureQueuedPlayback(player);
+  assert.equal(state.started, false);
+  assert.equal(player.playCalls, 0);
+});
+
 test('Kazagumo resolve failure cannot be reported as a successful start', async () => {
   const player = playerMock({
     llTrack: null,
