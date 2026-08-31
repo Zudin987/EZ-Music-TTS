@@ -26,6 +26,11 @@ jobs:
         with:
           node-version: 22.14.0
           package-manager-cache: false
+      - name: Verify full regression suite
+        run: |
+          npm ci
+          npm run check
+          npm test
       - name: Start production-profile Lavalink
         run: |
           set -euo pipefail
@@ -80,8 +85,8 @@ jobs:
           if (choices.some((choice) => /karaoke|instrumental|piano|remix|cover/i.test(`${choice.track.title || ''} ${choice.track.author || ''}`))) {
             throw new Error('An unrequested alternate-version result escaped filtering');
           }
-          if (!choices.some((choice) => /nmixx|jyp/i.test(`${choice.track.title || ''} ${choice.track.author || ''}`))) {
-            throw new Error('No NMIXX/JYP signal appears in the choices');
+          if (!choices.every((choice) => /nmixx|jyp/i.test(`${choice.track.title || ''} ${choice.track.author || ''}`))) {
+            throw new Error('An unrelated same-title artist remains in the picker');
           }
           const mvIndex = choices.findIndex((choice) => choice.kind === 'M/V');
           const preferredIndex = choices.findIndex((choice) => choice.kind === 'Lyrics' || choice.kind === 'Audio');
