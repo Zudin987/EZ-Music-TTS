@@ -42,4 +42,4 @@ jobs:
           git commit -m "fix: improve search matching and idle playback start"
           git push origin HEAD:fix/v019-search-start-nowplaying
 
-# Re-run after updating legacy fixtures for relevance-aware search and queue-aware Now Playing.
+# Re-run after restoring the original live-panel fixture and updating only v0.1.9 expectations.
