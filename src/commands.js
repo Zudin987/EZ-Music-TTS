@@ -25,7 +25,7 @@ import {
 import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 import { voiceTransportQuality } from './performance.js';
 import { createSearchPickerRegistry } from './search-picker.js';
-import { ensureQueuedPlayback } from './playback-start.js';
+import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';
 import { resolveSearchChoices, shouldOfferSearchChoices } from './search-choices.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
@@ -550,7 +550,7 @@ async function editLivePanel(interaction, player, notice = null) {
           `Spotify: **Tracks: oEmbed fallback${isSpotifyConfigured() ? ' + LavaSrc' : ''} • Albums/playlists: ${isSpotifyConfigured() ? 'Configured' : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Saved volume: **${volume}%**`,
-          `Player: **${player ? (isAutoPausedForEmptyVoice(interaction.guildId) ? 'Auto-paused (empty VC)' : (player.paused || player.shoukaku?.paused) ? 'Paused' : player.shoukaku?.track ? 'Playing' : (player.queue?.current || player.queue?.length > 0) ? 'Idle (queue waiting)' : 'Idle') : 'Disconnected'}**`,
+          `Player: **${player ? (isAutoPausedForEmptyVoice(interaction.guildId) ? 'Auto-paused (empty VC)' : (player.paused || player.shoukaku?.paused) ? 'Paused' : activeTrackMatchesCurrent(player) ? 'Playing' : (player.queue?.current || player.queue?.length > 0) ? 'Idle (queue waiting)' : 'Idle') : 'Disconnected'}**`,
         ];
         if (player) {
           const voicePing = Number(player.shoukaku?.ping ?? 0);
@@ -682,7 +682,7 @@ async function editLivePanel(interaction, player, notice = null) {
       if (name === 'nowplaying') {
         requireSameVoice(interaction, player);
         let notice = null;
-        if (!player.shoukaku?.track && !player.paused && !player.shoukaku?.paused && (player.queue.current || player.queue.length > 0)) {
+        if (!activeTrackMatchesCurrent(player) && !player.paused && !player.shoukaku?.paused && (player.queue.current || player.queue.length > 0)) {
           try {
             await withGuildOperation(interaction.guildId, async () => {
               await ensureQueuedPlayback(player);

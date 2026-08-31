@@ -7,7 +7,7 @@ import { ensureQueuedPlayback, playbackNeedsStart } from '../src/playback-start.
 import { jukeboxPlayerPayload } from '../src/ui.js';
 
 function track(title, author = 'Unknown') {
-  return { title, author, identifier: `${title}:${author}`, length: 180_000 };
+  return { title, author, identifier: `${title}:${author}`, track: 'encoded-track', length: 180_000 };
 }
 
 function searchTarget({ ytm = [], yt = [] }) {
