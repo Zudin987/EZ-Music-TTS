@@ -1,4 +1,4 @@
-import { rankSearchResult, SEARCH_MATCH_THRESHOLD } from './search-quality.js';
+import { isAmbiguousTitleOnlyMatch, rankSearchResult, SEARCH_MATCH_THRESHOLD } from './search-quality.js';
 
 const SPOTIFY_HOST = 'open.spotify.com';
 const SPOTIFY_SHORT_HOST = 'spotify.link';
@@ -133,11 +133,16 @@ export function hasExplicitSearchPrefix(value) {
 async function searchTextPreferred(target, clean, requester) {
   let ytmError = null;
   let rankedYtm = null;
+  let ytmNeedsYoutubeComparison = false;
   try {
     const ytm = await target.search(clean, { requester, source: 'ytmsearch:' });
     if (ytm?.tracks?.length) {
       rankedYtm = rankSearchResult(ytm, clean);
-      if (rankedYtm.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYtm.result;
+      if (rankedYtm.bestScore >= SEARCH_MATCH_THRESHOLD) {
+        const bestYtm = rankedYtm.result?.tracks?.[0];
+        ytmNeedsYoutubeComparison = isAmbiguousTitleOnlyMatch(clean, bestYtm);
+        if (!ytmNeedsYoutubeComparison) return rankedYtm.result;
+      }
     }
   } catch (error) {
     ytmError = error;
@@ -149,8 +154,9 @@ async function searchTextPreferred(target, clean, requester) {
       const rankedYoutube = rankSearchResult(youtube, clean);
       if (rankedYoutube.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYoutube.result;
     }
-    // A weak result is worse than an explicit no-result message: never silently
-    // substitute an unrelated title merely because a search endpoint returned it.
+    // If YouTube has no good answer, an otherwise strong YTM exact-title match is
+    // still preferable to returning nothing. The comparison only resolves ambiguity.
+    if (rankedYtm?.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYtm.result;
     return { ...(youtube || rankedYtm?.result || {}), tracks: [] };
   } catch (error) {
     if (rankedYtm?.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYtm.result;

@@ -15,6 +15,7 @@ import {
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 import { resolvePreferredSearch } from './source-routing.js';
 import { emptyVoiceTransition } from './performance.js';
+import { choosePlaybackAlternative, youtubeTrackId } from './playback-fallback.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -25,6 +26,7 @@ const EMPTY_VOICE_GRACE_MS = 120_000;
 const RECOVERY_SAVE_DEBOUNCE_MS = 750;
 const RECOVERY_POSITION_SAVE_MS = 15_000;
 const RECOVERY_SYNC_BATCH = 20;
+const PLAYBACK_FALLBACK_WINDOW_MS = 30_000;
 
 function youtubeId(track) {
   const direct = String(track?.identifier || '').trim();
@@ -68,6 +70,8 @@ export function createMusic(client, config, gemini) {
   const operationChains = new Map();
   const playerCreationPromises = new Map();
   const recoveryResumes = new Set();
+  const playbackFallbackInFlight = new Set();
+  const playbackFallbackAttempts = new Map();
   const spotifyConfigured = Boolean(config.spotifyClientId && config.spotifyClientSecret);
 
   const searchPreferred = (target, query, requester) => resolvePreferredSearch(target, query, requester, { spotifyConfigured });
@@ -479,6 +483,45 @@ export function createMusic(client, config, gemini) {
     return state;
   }
 
+  async function tryYoutubePlaybackFallback(player, failedTrack, message) {
+    const guildId = player?.guildId;
+    const failedId = youtubeTrackId(failedTrack);
+    const title = String(failedTrack?.title || '').trim();
+    if (!guildId || !failedId || !title || failedTrack?._ezPlaybackFallback) return false;
+    if (playbackFallbackInFlight.has(guildId)) return false;
+
+    const fingerprint = `${failedId}:${title.toLowerCase()}`;
+    const previous = playbackFallbackAttempts.get(guildId);
+    if (previous?.fingerprint === fingerprint && Date.now() - previous.at < PLAYBACK_FALLBACK_WINDOW_MS) return false;
+    playbackFallbackAttempts.set(guildId, { fingerprint, at: Date.now() });
+    playbackFallbackInFlight.add(guildId);
+
+    try {
+      const result = await player.search(title, { requester: failedTrack?.requester || client.user, source: 'ytsearch:' });
+      const alternative = choosePlaybackAlternative(title, result?.tracks, failedTrack);
+      if (!alternative) return false;
+
+      return await withGuildOperation(guildId, async () => {
+        if (music.players.get(guildId) !== player || player.paused || player.shoukaku?.paused) return false;
+        const current = player.queue.current;
+        const currentId = youtubeTrackId(current);
+        // Never interrupt a different item if the queue already advanced while the
+        // fallback search was in flight. Replacing the same failed item is safe.
+        if (currentId && currentId !== failedId) return false;
+        try { alternative._ezPlaybackFallback = true; } catch { /* track may be sealed */ }
+        console.warn(`[playback-fallback] ${guildId}: ${failedTrack.title} failed (${String(message || "source error").slice(0, 120)}); retrying ${alternative.title} — ${alternative.author || "Unknown"}`);
+        await player.play(alternative, { replaceCurrent: true });
+        checkpointRecovery(player);
+        return true;
+      });
+    } catch (error) {
+      console.warn('[playback-fallback] alternate video retry failed', error?.message || error);
+      return false;
+    } finally {
+      playbackFallbackInFlight.delete(guildId);
+    }
+  }
+
   function clearEmptyVoiceTimer(guildId) {
     const timer = emptyVoiceTimers.get(guildId);
     if (timer) clearTimeout(timer);
@@ -632,8 +675,18 @@ export function createMusic(client, config, gemini) {
 
   music.on('playerException', (player, data) => {
     const message = data?.exception?.message || data?.message || 'track exception';
+    const failedTrack = player.queue.current || lastTracks.get(player.guildId) || null;
+    const failedId = youtubeTrackId(failedTrack);
     console.warn('[player-exception]', player.guildId, message);
-    recordPlaybackFailure(player, message);
+    void (async () => {
+      if (await tryYoutubePlaybackFallback(player, failedTrack, message)) return;
+      const currentId = youtubeTrackId(player.queue.current);
+      const sameFailedItem = !failedId || !currentId || currentId === failedId;
+      recordPlaybackFailure(player, message, { skipCurrent: sameFailedItem });
+    })().catch((error) => {
+      console.warn('[player-exception] fallback handler failed', error?.message || error);
+      recordPlaybackFailure(player, message);
+    });
   });
 
   music.on('playerResolveError', (player, track, message) => {
@@ -719,6 +772,8 @@ export function createMusic(client, config, gemini) {
     clearSourceSuccess(player.guildId);
     clearRecoverySaveTimer(player.guildId);
     recoveryPositionSavedAt.delete(player.guildId);
+    playbackFallbackInFlight.delete(player.guildId);
+    playbackFallbackAttempts.delete(player.guildId);
     discardHeldQueue(player.guildId);
     await clearVoiceStatus(player);
     voiceIds.delete(player.guildId);

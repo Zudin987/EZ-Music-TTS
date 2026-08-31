@@ -25,7 +25,7 @@ test('YouTube client chain is short, upstream-aligned and avoids non-Opus/restri
   const normalized = app.replace(/\r\n/g, '\n');
   const section = normalized.split('  youtube:\n')[1]?.split('\nlogging:')[0] || '';
   const clients = [...section.matchAll(/^      - ([A-Z0-9_]+)$/gm)].map((match) => match[1]);
-  assert.deepEqual(clients, ['MUSIC', 'ANDROID_VR', 'WEB', 'WEBEMBEDDED']);
+  assert.deepEqual(clients, ['MUSIC', 'ANDROID_VR', 'WEB', 'WEBEMBEDDED', 'MWEB', 'ANDROID_MUSIC']);
   assert.ok(!clients.includes('ANDROID'));
   assert.ok(!clients.includes('IOS'));
   assert.ok(!clients.includes('TVHTML5_SIMPLY'));

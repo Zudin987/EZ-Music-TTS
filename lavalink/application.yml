@@ -96,16 +96,18 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    # Keep the playback path short and Opus-capable. This follows the current
-    # youtube-source recommended example: MUSIC searches, then playback falls
-    # through ANDROID_VR -> WEB -> WEBEMBEDDED. Avoiding regular ANDROID (marked
-    # frequently dysfunctional upstream), IOS (no Opus), and TVHTML5_SIMPLY also
-    # avoids known failed-client work before playback starts.
+    # Keep the normal playback path identical to upstream's recommended example,
+    # then add MWEB and ANDROID_MUSIC only as last-resort Opus-capable fallbacks.
+    # They cost nothing once an earlier client succeeds. Regular ANDROID remains
+    # excluded (frequently dysfunctional), IOS remains excluded (no Opus / extra
+    # transcoding), and TVHTML5_SIMPLY stays excluded after prior sign-in/403 issues.
     clients:
       - MUSIC
       - ANDROID_VR
       - WEB
       - WEBEMBEDDED
+      - MWEB
+      - ANDROID_MUSIC
 
 logging:
   level:
