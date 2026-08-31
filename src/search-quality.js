@@ -3,7 +3,7 @@ const SEARCH_NOISE = new Set([
   'music', 'topic', 'vevo', 'feat', 'ft', 'featuring',
 ]);
 
-const VARIANT_PATTERNS = [
+const TITLE_VARIANT_PATTERNS = [
   ['cover'],
   ['karaoke'],
   ['instrumental'],
@@ -13,6 +13,17 @@ const VARIANT_PATTERNS = [
   ['slowed'],
   ['live'],
   ['sped', 'up'],
+];
+
+// Some alternate-version uploaders leave the title completely clean, e.g.
+// "Heavy Serenade — Shin Giwon Piano". These source-name hints are strong
+// enough to down-rank unless the user explicitly includes the same intent.
+const AUTHOR_VARIANT_PATTERNS = [
+  ['cover'],
+  ['karaoke'],
+  ['instrumental'],
+  ['piano'],
+  ['tribute'],
 ];
 
 function rawTokens(value) {
@@ -34,12 +45,15 @@ function includesPattern(tokenSet, pattern) {
   return pattern.every((token) => tokenSet.has(token));
 }
 
-function hasUnrequestedVariant(query, title) {
+function hasUnrequestedVariant(query, track) {
   const queryTokens = new Set(rawTokens(query));
-  const titleTokens = new Set(rawTokens(title));
-  return VARIANT_PATTERNS.some((pattern) => (
-    includesPattern(titleTokens, pattern) && !includesPattern(queryTokens, pattern)
-  ));
+  const titleTokens = new Set(rawTokens(track?.title));
+  const authorTokens = new Set(rawTokens(track?.author));
+  const unrequested = (tokenSet, pattern) => (
+    includesPattern(tokenSet, pattern) && !includesPattern(queryTokens, pattern)
+  );
+  return TITLE_VARIANT_PATTERNS.some((pattern) => unrequested(titleTokens, pattern))
+    || AUTHOR_VARIANT_PATTERNS.some((pattern) => unrequested(authorTokens, pattern));
 }
 
 function coverage(queryTokens, candidateTokens) {
@@ -63,7 +77,7 @@ export function searchTrackScore(query, track) {
   // A cover/karaoke/instrumental/etc. can have a perfect title match while still
   // being the wrong version. Prefer the standard/original result unless the user
   // explicitly asked for that variant.
-  if (hasUnrequestedVariant(query, track?.title)) score *= 0.4;
+  if (hasUnrequestedVariant(query, track)) score *= 0.4;
   return score;
 }
 
