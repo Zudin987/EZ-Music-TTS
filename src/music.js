@@ -1,5 +1,5 @@
 import { Kazagumo } from 'kazagumo';
-import { Connectors } from 'shoukaku';
+import { Connectors, Constants } from 'shoukaku';
 import {
   addHistory,
   deleteRecoverySession,
@@ -17,6 +17,7 @@ import { resolvePreferredSearch } from './source-routing.js';
 import { emptyVoiceTransition } from './performance.js';
 import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQueries, playbackFallbackQuery, restoreFallbackQueue, takeFallbackQueueHold, youtubeTrackId } from './playback-fallback.js';
 import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';
+import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -30,6 +31,7 @@ const RECOVERY_SYNC_BATCH = 20;
 const PLAYBACK_FALLBACK_WINDOW_MS = 30_000;
 const PLAYBACK_FALLBACK_SEARCH_TIMEOUT_MS = 6_000;
 const PLAYBACK_FALLBACK_SETTLE_TIMEOUT_MS = 2_000;
+const LAVALINK_NODE_NAME = 'local';
 
 function youtubeId(track) {
   const direct = String(track?.identifier || '').trim();
@@ -53,7 +55,12 @@ export function createMusic(client, config, gemini) {
   }, new Connectors.DiscordJS(client), nodes, {
     resume: true,
     resumeTimeout: 30,
-    reconnectTries: 8,
+    // Shoukaku 4.3.0 has an upstream reconnect bug where a failed attempt can
+    // leave a stale connectError that tears down a later successful retry in the
+    // same connect() loop. One library attempt + our event-driven node supervisor
+    // avoids that bug without replacing/forking Shoukaku.
+    reconnectTries: 1,
+    reconnectInterval: 2,
     restTimeout: 20_000,
   });
 
@@ -76,9 +83,119 @@ export function createMusic(client, config, gemini) {
   const playbackFallbackAttempts = new Map();
   const playbackFallbackHolds = new Map();
   const pendingPlaybackHistory = new Map();
+  const voiceCloseRecoveryTimers = new Map();
+  const transportRetirements = new Map();
+  let localNodeReconnectTimer = null;
+  let localNodeReconnectAttempt = 0;
+  let localNodeRetryAt = 0;
+  let localNodeEverReady = false;
+  let localNodeState = 'starting';
+  let localNodeLastError = '';
   const spotifyConfigured = Boolean(config.spotifyClientId && config.spotifyClientSecret);
 
   const searchPreferred = (target, query, requester) => resolvePreferredSearch(target, query, requester, { spotifyConfigured });
+
+  function clearVoiceCloseRecoveryTimer(guildId) {
+    const timer = voiceCloseRecoveryTimers.get(guildId);
+    if (timer) clearTimeout(timer);
+    voiceCloseRecoveryTimers.delete(guildId);
+  }
+
+  function clearLocalNodeReconnectTimer() {
+    if (localNodeReconnectTimer) clearTimeout(localNodeReconnectTimer);
+    localNodeReconnectTimer = null;
+    localNodeRetryAt = 0;
+  }
+
+  function isLocalNodeConnected() {
+    return music.shoukaku.nodes.get(LAVALINK_NODE_NAME)?.state === Constants.State.CONNECTED;
+  }
+
+  function getLavalinkNodeHealth() {
+    const node = music.shoukaku.nodes.get(LAVALINK_NODE_NAME);
+    if (node?.state === Constants.State.CONNECTED) {
+      return { status: 'connected', attempt: 0, retryAt: 0, lastError: '' };
+    }
+    const connecting = node?.state === Constants.State.CONNECTING;
+    return {
+      status: connecting || localNodeReconnectTimer || localNodeState === 'reconnecting' ? 'reconnecting' : localNodeState,
+      attempt: localNodeReconnectAttempt,
+      retryAt: localNodeRetryAt,
+      lastError: localNodeLastError,
+    };
+  }
+
+  async function retirePlayerForTransportLoss(player, reason) {
+    if (!player || music.players.get(player.guildId) !== player) return false;
+    const guildId = player.guildId;
+    const existing = transportRetirements.get(guildId);
+    if (existing) return existing;
+
+    const retirement = (async () => {
+      console.warn(`[transport] retiring stale player ${guildId}: ${String(reason || 'transport lost').slice(0, 220)}`);
+      // Snapshot current + upcoming + held fallback work before any in-memory
+      // cleanup. This makes a node/server/voice failure recoverable via /status.
+      checkpointRecovery(player);
+      invalidateQueueWork(guildId);
+      clearVoiceCloseRecoveryTimer(guildId);
+
+      // Shoukaku's leaveVoiceChannel is intentionally used instead of
+      // KazagumoPlayer.destroy(): it catches a dead-node REST destroy failure but
+      // still sends Discord channel_id:null and removes Shoukaku connection state.
+      try { await music.shoukaku.leaveVoiceChannel(guildId); }
+      catch (error) { console.warn('[transport] Shoukaku voice cleanup failed', error?.message || error); }
+
+      if (music.players.get(guildId) === player) music.players.delete(guildId);
+      player.playing = false;
+      player.paused = false;
+      player.voiceId = null;
+      await handlePlayerDestroy(player);
+      return true;
+    })().finally(() => {
+      if (transportRetirements.get(guildId) === retirement) transportRetirements.delete(guildId);
+    });
+
+    transportRetirements.set(guildId, retirement);
+    return retirement;
+  }
+
+  async function retirePlayersForNodeLoss(reason) {
+    const affected = [...music.players.values()].filter((player) => player?.shoukaku?.node?.name === LAVALINK_NODE_NAME);
+    if (!affected.length) return 0;
+    await Promise.allSettled(affected.map((player) => retirePlayerForTransportLoss(player, reason)));
+    return affected.length;
+  }
+
+  function scheduleLocalNodeReplacement(reason = 'Lavalink node unavailable') {
+    if (isLocalNodeConnected() || localNodeReconnectTimer) return false;
+    const existing = music.shoukaku.nodes.get(LAVALINK_NODE_NAME);
+    if (existing?.state === Constants.State.CONNECTING) return false;
+    if (existing && existing.state !== Constants.State.CONNECTED) music.shoukaku.nodes.delete(LAVALINK_NODE_NAME);
+
+    localNodeState = 'reconnecting';
+    localNodeLastError = String(reason || '').slice(0, 500);
+    const attempt = ++localNodeReconnectAttempt;
+    const delay = nodeReconnectDelayMs(attempt);
+    localNodeRetryAt = Date.now() + delay;
+    console.warn(`[lavalink] local node unavailable; replacement attempt ${attempt} in ${Math.round(delay / 1000)}s`);
+
+    localNodeReconnectTimer = setTimeout(() => {
+      localNodeReconnectTimer = null;
+      localNodeRetryAt = 0;
+      if (isLocalNodeConnected()) return;
+      const current = music.shoukaku.nodes.get(LAVALINK_NODE_NAME);
+      if (current?.state === Constants.State.CONNECTING) return;
+      if (current) music.shoukaku.nodes.delete(LAVALINK_NODE_NAME);
+      try {
+        music.shoukaku.addNode(nodes[0]);
+      } catch (error) {
+        localNodeLastError = String(error?.message || error).slice(0, 500);
+        scheduleLocalNodeReplacement(localNodeLastError);
+      }
+    }, delay);
+    localNodeReconnectTimer.unref?.();
+    return true;
+  }
 
   async function withGuildOperation(guildId, task) {
     const previous = operationChains.get(guildId) || Promise.resolve();
@@ -911,6 +1028,7 @@ export function createMusic(client, config, gemini) {
     return {
       node: { rss: node.rss, heapUsed: node.heapUsed, heapTotal: node.heapTotal },
       lavalink,
+      lavalinkNode: getLavalinkNodeHealth(),
       queueLimit: MAX_UPCOMING_QUEUE,
     };
   }
@@ -920,9 +1038,48 @@ export function createMusic(client, config, gemini) {
     setAutoplayMode(config.discordGuildId, 'off');
   }
 
-  music.shoukaku.on('ready', (name, resumed) => console.log(`[lavalink] ${name} ready${resumed ? ' (resumed)' : ''}`));
-  music.shoukaku.on('error', (name, error) => console.error(`[lavalink] ${name}`, error));
-  music.shoukaku.on('close', (name, code, reason) => console.warn(`[lavalink] ${name} closed ${code}: ${reason || 'no reason'}`));
+  music.shoukaku.on('ready', (name, resumed, libraryResumed = false) => {
+    console.log(`[lavalink] ${name} ready${resumed ? ' (resumed)' : ''}`);
+    if (name !== LAVALINK_NODE_NAME) return;
+    const hadReady = localNodeEverReady;
+    localNodeEverReady = true;
+    localNodeState = 'connected';
+    localNodeLastError = '';
+    localNodeReconnectAttempt = 0;
+    clearLocalNodeReconnectTimer();
+
+    // A websocket reconnect can succeed while the Lavalink *server session* was
+    // lost (for example Lavalink.jar restarted). Server-side resume=false means
+    // the cached Kazagumo players no longer exist remotely. Retire them instead
+    // of letting /play or /nowplaying operate on ghosts.
+    if (hadReady && !resumed && !libraryResumed) {
+      void retirePlayersForNodeLoss('Lavalink reconnected with a fresh session; previous remote players no longer exist');
+    }
+  });
+  music.shoukaku.on('reconnecting', (name, left, interval) => {
+    if (name === LAVALINK_NODE_NAME) localNodeState = 'reconnecting';
+    console.warn(`[lavalink] ${name} reconnecting (${left} library attempt${left === 1 ? '' : 's'} left, ${interval}s interval)`);
+  });
+  music.shoukaku.on('error', (name, error) => {
+    console.error(`[lavalink] ${name}`, error);
+    if (name !== LAVALINK_NODE_NAME) return;
+    localNodeLastError = String(error?.message || error).slice(0, 500);
+    const node = music.shoukaku.nodes.get(name);
+    if (!node || node.state === Constants.State.DISCONNECTED) {
+      localNodeState = 'unavailable';
+      void retirePlayersForNodeLoss(`Lavalink node disconnected: ${localNodeLastError}`);
+      scheduleLocalNodeReplacement(localNodeLastError);
+    }
+  });
+  music.shoukaku.on('close', (name, code, reason) => {
+    console.warn(`[lavalink] ${name} closed ${code}: ${reason || 'no reason'}`);
+    if (name !== LAVALINK_NODE_NAME) return;
+    localNodeState = 'reconnecting';
+    localNodeLastError = `websocket closed ${code}: ${reason || 'no reason'}`;
+    // Persist before Shoukaku attempts session resume. A successful first retry
+    // continues normally; a failed retry can then retire the player safely.
+    checkpointAllRecoveries();
+  });
 
   music.on('playerStart', (player, track) => {
     void handlePlayerStart(player, track).catch((error) => console.warn('[player-start]', error?.message || error));
@@ -930,7 +1087,8 @@ export function createMusic(client, config, gemini) {
 
   music.on('queueUpdate', (player) => scheduleRecoverySave(player));
 
-  music.on('playerUpdate', (player) => {
+  music.on('playerUpdate', (player, data) => {
+    if (data?.state?.connected) clearVoiceCloseRecoveryTimer(player.guildId);
     commitPendingPlaybackHistory(player);
     const now = Date.now();
     const last = recoveryPositionSavedAt.get(player.guildId) || 0;
@@ -942,7 +1100,11 @@ export function createMusic(client, config, gemini) {
 
   music.on('playerException', (player, data) => {
     const message = data?.exception?.message || data?.message || 'track exception';
-    const failedTrack = player.queue.current || lastTracks.get(player.guildId) || null;
+    const failedTrack = resolveLifecycleEventTrack(data?.track, player.queue.current, lastTracks.get(player.guildId) || null);
+    if (!failedTrack) {
+      console.warn('[player-exception]', player.guildId, 'stale track event ignored:', message);
+      return;
+    }
     const failedId = youtubeTrackId(failedTrack);
     clearPendingPlaybackHistory(player.guildId, failedTrack);
     console.warn('[player-exception]', player.guildId, message);
@@ -979,9 +1141,18 @@ export function createMusic(client, config, gemini) {
 
   music.on('playerStuck', (player, data) => {
     const message = `track stuck (${data?.thresholdMs || 'unknown'} ms)`;
-    clearPendingPlaybackHistory(player.guildId, player.queue.current);
+    const failedTrack = resolveLifecycleEventTrack(data?.track, player.queue.current, lastTracks.get(player.guildId) || null);
+    if (!failedTrack) {
+      console.warn('[player-stuck]', player.guildId, 'stale track event ignored:', message);
+      return;
+    }
+    clearPendingPlaybackHistory(player.guildId, failedTrack);
     console.warn('[player-stuck]', player.guildId, message);
-    recordPlaybackFailure(player, message);
+    recordPlaybackFailure(player, message, { trackOverride: failedTrack });
+  });
+
+  music.on('playerClosed', (player, data) => {
+    void handlePlayerClosed(player, data).catch((error) => console.warn('[player-closed]', error?.message || error));
   });
 
   music.on('playerEmpty', (player) => {
@@ -992,9 +1163,36 @@ export function createMusic(client, config, gemini) {
     void handlePlayerDestroy(player).catch((error) => console.warn('[player-destroy]', error?.message || error));
   });
 
+  async function handlePlayerClosed(player, data) {
+    if (!player || music.players.get(player.guildId) !== player || !player.voiceId) return;
+    const code = Number(data?.code || 0);
+    const reason = String(data?.reason || 'voice websocket closed');
+    console.warn(`[voice] Discord voice websocket closed for ${player.guildId}: ${code || 'unknown'} ${reason}`);
+    clearPendingPlaybackHistory(player.guildId);
+    checkpointRecovery(player);
+    clearVoiceCloseRecoveryTimer(player.guildId);
+
+    if (voiceCloseDisposition(code) === 'retire') {
+      await retirePlayerForTransportLoss(player, `Discord voice closed ${code}: ${reason}`);
+      return;
+    }
+
+    // Some transient voice closes recover inside Lavalink/Koe. Give that path a
+    // short chance and cancel this watchdog as soon as a connected playerUpdate
+    // arrives. If it never does, preserve recovery and retire the stale wrapper.
+    const timer = setTimeout(() => {
+      voiceCloseRecoveryTimers.delete(player.guildId);
+      if (music.players.get(player.guildId) !== player || !player.voiceId) return;
+      void retirePlayerForTransportLoss(player, `Discord voice did not recover after close ${code}: ${reason}`);
+    }, VOICE_CLOSE_RECOVERY_GRACE_MS);
+    timer.unref?.();
+    voiceCloseRecoveryTimers.set(player.guildId, timer);
+  }
+
   async function handlePlayerStart(player, track) {
     clearDisconnect(player.guildId);
     clearEmptyVoiceTimer(player.guildId);
+    clearVoiceCloseRecoveryTimer(player.guildId);
     scheduleSourceSuccess(player, track);
     lastTracks.set(player.guildId, track);
     if (player.voiceId) voiceIds.set(player.guildId, player.voiceId);
@@ -1059,6 +1257,7 @@ export function createMusic(client, config, gemini) {
     invalidateQueueWork(player.guildId);
     clearDisconnect(player.guildId);
     clearEmptyVoiceTimer(player.guildId);
+    clearVoiceCloseRecoveryTimer(player.guildId);
     emptyVoiceAutoPaused.delete(player.guildId);
     clearSourceSuccess(player.guildId);
     clearRecoverySaveTimer(player.guildId);
@@ -1103,6 +1302,12 @@ export function createMusic(client, config, gemini) {
   async function ensurePlayer(interaction) {
     const voice = interaction.member?.voice?.channel;
     if (!voice) throw new Error('Join a voice channel first.');
+
+    const nodeHealth = getLavalinkNodeHealth();
+    if (nodeHealth.status !== 'connected') {
+      const retrySeconds = nodeHealth.retryAt > Date.now() ? Math.max(1, Math.ceil((nodeHealth.retryAt - Date.now()) / 1000)) : 0;
+      throw queueCanceledError(`Lavalink is ${nodeHealth.status === 'reconnecting' ? 'reconnecting' : 'temporarily unavailable'}${retrySeconds ? `; retrying in about ${retrySeconds}s` : ''}. Your saved recovery queue is preserved.`);
+    }
 
     const sourceHealth = getSourceHealth(interaction.guildId);
     if (sourceHealth.status === 'degraded' || sourceHealth.status === 'recovering') {
@@ -1390,6 +1595,7 @@ export function createMusic(client, config, gemini) {
     getQueueLimit: () => MAX_UPCOMING_QUEUE,
     getRuntimeStats,
     getSourceHealth,
+    getLavalinkNodeHealth,
     isAutoPausedForEmptyVoice: (guildId) => emptyVoiceAutoPaused.has(guildId),
     getHeldQueueCount,
     discardHeldQueue,
