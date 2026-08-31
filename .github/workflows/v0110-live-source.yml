@@ -43,57 +43,61 @@ jobs:
             sleep 2
           done
           if [ "$ready" -ne 1 ]; then tail -n 200 lavalink-v0110.log >&2 || true; exit 1; fi
-      - name: Resolve exact reported query through real sources
+      - name: Validate exact reported route and live fallback candidate
         run: |
           node --input-type=module <<'NODE'
           import { resolvePreferredSearch } from './src/source-routing.js';
+          import { chooseSoundCloudAlternative, playbackFallbackQuery } from './src/playback-fallback.js';
+
+          async function load(identifier) {
+            const url = new URL('http://127.0.0.1:2333/v4/loadtracks');
+            url.searchParams.set('identifier', identifier);
+            const response = await fetch(url, { headers: { Authorization: 'ezmusic-local-only' } });
+            if (!response.ok) throw new Error(`Lavalink ${response.status}`);
+            return response.json();
+          }
           const calls = [];
           const target = {
             async search(query, options = {}) {
               const identifier = options.source ? `${options.source}${query}` : query;
               calls.push(identifier);
-              const url = new URL('http://127.0.0.1:2333/v4/loadtracks');
-              url.searchParams.set('identifier', identifier);
-              const response = await fetch(url, { headers: { Authorization: 'ezmusic-local-only' } });
-              if (!response.ok) throw new Error(`Lavalink ${response.status}`);
-              const body = await response.json();
+              const body = await load(identifier);
               const raw = body.loadType === 'search' ? body.data : body.loadType === 'track' ? [body.data] : [];
               return { type: body.loadType === 'search' ? 'SEARCH' : body.loadType?.toUpperCase?.() || 'EMPTY', tracks: raw.map((item) => ({ ...(item.info || {}), encoded: item.encoded })) };
             },
           };
-          const result = await resolvePreferredSearch(target, 'Heavy Serenade', null);
-          const first = result?.tracks?.[0];
-          if (!first || !/heavy/i.test(first.title || '') || !/serenade/i.test(first.title || '')) throw new Error(`Wrong/no selection: ${first?.title} — ${first?.author}`);
-          if (!/nmixx|jyp/i.test(`${first.title || ''} ${first.author || ''}`)) throw new Error(`Ambiguous uploader still won: ${first.title} — ${first.author}`);
-          if (calls[0] !== 'ytmsearch:Heavy Serenade' || calls[1] !== 'ytsearch:Heavy Serenade') throw new Error(`Expected YTM -> YouTube comparison, got ${calls.join(' -> ')}`);
-          console.log(`selected: ${first.title} — ${first.author}`);
-          console.log(`uri: ${first.uri}`);
-          NODE
-      - name: Confirm current YouTube block and inspect SoundCloud fallback
-        run: |
-          node --input-type=module <<'NODE'
-          async function load(identifier) {
-            const url = new URL('http://127.0.0.1:2333/v4/loadtracks');
-            url.searchParams.set('identifier', identifier);
-            const response = await fetch(url, { headers: { Authorization: 'ezmusic-local-only' } });
-            const body = await response.json();
-            return body;
-          }
-          const youtube = await load('https://www.youtube.com/watch?v=6Ycn9qZK09I');
-          if (youtube.loadType !== 'error') throw new Error(`Expected current credential-free YouTube direct load to expose upstream block; got ${youtube.loadType}`);
-          console.log('YouTube direct load currently blocked as expected by upstream issue.');
 
-          for (const query of ['scsearch:NMIXX Heavy Serenade', 'scsearch:Heavy Serenade']) {
-            const body = await load(query);
-            const tracks = body.loadType === 'search' ? body.data : [];
-            console.log(`SoundCloud ${query}:`, tracks.slice(0, 5).map((item) => `${item.info?.title} — ${item.info?.author}`).join(' | '));
-            const match = tracks.find((item) => /heavy/i.test(item.info?.title || '') && /serenade/i.test(item.info?.title || ''));
-            if (match) {
-              console.log(`SoundCloud candidate: ${match.info.title} — ${match.info.author} — ${match.info.uri}`);
-              process.exit(0);
-            }
+          const selected = (await resolvePreferredSearch(target, 'Heavy Serenade', null))?.tracks?.[0];
+          if (!selected || !/nmixx|jyp/i.test(`${selected.title || ''} ${selected.author || ''}`)) {
+            throw new Error(`Wrong primary selection: ${selected?.title} — ${selected?.author}`);
           }
-          throw new Error('No Heavy Serenade SoundCloud fallback candidate found');
+          if (calls[0] !== 'ytmsearch:Heavy Serenade' || calls[1] !== 'ytsearch:Heavy Serenade') {
+            throw new Error(`Expected YTM -> YouTube ambiguity comparison, got ${calls.join(' -> ')}`);
+          }
+          console.log(`primary: ${selected.title} — ${selected.author} — ${selected.uri}`);
+
+          const youtube = await load(selected.uri);
+          if (youtube.loadType !== 'error') throw new Error(`Expected current credential-free YouTube block, got ${youtube.loadType}`);
+          console.log('primary YouTube direct load is currently blocked by upstream login/SABR behavior.');
+
+          const fallbackQuery = playbackFallbackQuery(selected);
+          const scBody = await load(`scsearch:${fallbackQuery}`);
+          const scTracks = scBody.loadType === 'search' ? scBody.data.map((item) => ({ ...(item.info || {}), encoded: item.encoded })) : [];
+          const alternative = chooseSoundCloudAlternative(fallbackQuery, scTracks, selected);
+          if (!alternative) throw new Error(`No relevance-checked SoundCloud alternative for ${fallbackQuery}`);
+          if (/remix|karaoke|instrumental|cover/i.test(`${alternative.title || ''} ${alternative.author || ''}`)) {
+            throw new Error(`Variant fallback escaped filtering: ${alternative.title} — ${alternative.author}`);
+          }
+          console.log(`fallback: ${alternative.title} — ${alternative.author} — ${alternative.uri}`);
+
+          const directSc = await load(alternative.uri);
+          if (directSc.loadType !== 'track') {
+            throw new Error(`SoundCloud candidate does not direct-load as a track: ${directSc.loadType}`);
+          }
+          if (directSc.data?.info?.sourceName !== 'soundcloud') {
+            throw new Error(`Unexpected fallback source: ${directSc.data?.info?.sourceName}`);
+          }
+          console.log('SoundCloud fallback direct-load succeeded.');
           NODE
       - name: Stop Lavalink
         if: always()
@@ -101,4 +105,4 @@ jobs:
           if [ -f lavalink-v0110.pid ]; then kill "$(cat lavalink-v0110.pid)" 2>/dev/null || true; fi
       - name: Show log on failure
         if: failure()
-        run: tail -n 120 lavalink-v0110.log || true
+        run: tail -n 160 lavalink-v0110.log || true
