@@ -4,8 +4,9 @@ function hasQueuedWork(player) {
 
 export function playbackNeedsStart(player) {
   if (!player || !hasQueuedWork(player)) return false;
-  // Never turn a deliberate pause into an implicit resume.
-  if (player.queue?.current && (player.paused || player.shoukaku?.paused)) return false;
+  // Never turn any explicit paused state into an implicit resume, even if a
+  // failed/transitioned current item temporarily left only upcoming tracks.
+  if (player.paused || player.shoukaku?.paused) return false;
   // Shoukaku's track field reflects whether Lavalink actually has a track.
   // Kazagumo's wrapper `playing` flag can briefly/stale remain true after a
   // failed/ended item, so do not use it as the only start gate.
