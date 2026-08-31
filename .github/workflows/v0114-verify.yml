@@ -39,7 +39,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q -- '-Xms64M -Xmx256M' start-bot.bat
+          grep -q -- '-Xms64M' start-bot.bat
+          grep -q -- '-Xmx256M' start-bot.bat
           grep -q -- '--max-old-space-size=128' start-bot.bat
           grep -q 'bufferDurationMs: 2000' lavalink/application.yml
           grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
