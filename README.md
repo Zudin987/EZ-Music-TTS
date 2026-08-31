@@ -93,14 +93,15 @@ java -version
 
 ## `.env`
 
-Only the three Discord values are mandatory. Gemini is optional.
+Only the three Discord values are mandatory. Gemini is optional. Single Spotify **track** links also work without Spotify credentials through the official oEmbed metadata endpoint and are mirrored through the existing YTM/YouTube search path. Spotify album/playlist importing still needs working LavaSrc Spotify credentials.
 
 ```dotenv
 DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_application_id
 DISCORD_GUILD_ID=your_server_id
 
-# Optional Spotify URL metadata/mirroring (Spotify developer app required)
+# Optional Spotify album/playlist mirroring (Premium-owned developer app required)
+# Single track links work without credentials via oEmbed -> YTM/YouTube
 SPOTIFY_CLIENT_ID=
 SPOTIFY_CLIENT_SECRET=
 SPOTIFY_COUNTRY_CODE=MY
@@ -212,11 +213,14 @@ Lavalink also enables `nonAllocatingFrameBuffer: true`, disables routine REST re
 - **Queue ceiling:** maximum 300 upcoming tracks; a single playlist adds at most 250.
 - **Empty-room auto-pause/leave:** when the last human listener leaves during active playback, EZ Music pauses immediately to stop unnecessary audio work. If a human returns within 2 minutes, playback resumes from that automatic pause; manual pauses stay paused. If the room remains empty for 2 minutes, the existing disconnect/reset cleanup runs.
 - **Source circuit breaker:** three early playback/resolve failures inside 60 seconds pause automatic queue consumption, disable autoplay/loop, preserve remaining upcoming tracks in memory, and retry once after a cooldown instead of burning through the whole queue. A stable track for 20 seconds resets the failure window. Preserved tracks are also included in crash-recovery checkpoints.
+- **Spotify track fallback is bounded:** oEmbed metadata lookup uses the existing Node process only, has a 2.5-second timeout and 64 KiB response ceiling, then reuses the normal YTM -> YouTube search path. It never enters the live Lavalink audio stream.
+- **GC pause diagnostics:** Lavalink GC warnings are enabled so a future Java pause can be correlated with frame starvation without adding a monitor/service or changing the buffer profile.
 - **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.
 
 # Music sources
 
 - YouTube through the maintained `youtube-source` plugin, pinned to the current August 2026 upstream playback-fix snapshot used by this bot. Client order is kept short and Opus-capable: `MUSIC` (search only) → `ANDROID_VR` → `WEB` → `WEBEMBEDDED`, matching the current upstream example and avoiding known failed/restricted/transcoding-prone clients before playback.
+- Spotify single-track links through official oEmbed metadata -> YTM/YouTube audio; no Spotify credentials are required for this fallback. If working Spotify/LavaSrc credentials exist, direct metadata mirroring is tried first and a failed track lookup falls back automatically. Album/playlist importing still requires those credentials. `spotify.link` short links are canonicalized through oEmbed.
 - SoundCloud
 - Bandcamp
 

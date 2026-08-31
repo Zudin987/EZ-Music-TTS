@@ -48,6 +48,9 @@ lavalink:
     # 3 pages x ~100 tracks keeps huge YouTube playlists from creating large
     # transient responses on a machine with a strict RAM budget.
     youtubePlaylistLoadLimit: 3
+    # Diagnostic only: report unusually long JVM GC pauses so they can be
+    # correlated with frame starvation without adding another monitor/service.
+    gc-warnings: true
 
 plugins:
   lavasrc:

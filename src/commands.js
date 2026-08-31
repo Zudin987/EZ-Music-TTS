@@ -538,7 +538,7 @@ async function editLivePanel(interaction, player, notice = null) {
           `Lavalink: **${lavalink}**`,
           sourceHealthLine(health),
           `Gemini: **${gemini.enabled ? `Configured (${gemini.model})` : 'Not configured'}**`,
-          `Spotify URL mirror: **${isSpotifyConfigured() ? 'Configured' : 'Not configured'}**`,
+          `Spotify: **Tracks: oEmbed fallback${isSpotifyConfigured() ? ' + LavaSrc' : ''} • Albums/playlists: ${isSpotifyConfigured() ? 'Configured' : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Saved volume: **${volume}%**`,
           `Player: **${player ? (isAutoPausedForEmptyVoice(interaction.guildId) ? 'Auto-paused (empty VC)' : player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
