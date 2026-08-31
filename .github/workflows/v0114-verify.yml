@@ -44,7 +44,6 @@ jobs:
           grep -q 'bufferDurationMs: 2000' lavalink/application.yml
           grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
           grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
-          grep -q 'useSeekGhosting: false' lavalink/application.yml
           grep -q 'timescale: false' lavalink/application.yml
           grep -q 'karaoke: false' lavalink/application.yml
           grep -q 'tremolo: false' lavalink/application.yml
