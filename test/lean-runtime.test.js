@@ -35,8 +35,9 @@ test('queue growth is bounded in both Lavalink and bot code', () => {
 test('empty-room auto-pause/leave and source circuit breaker are present', () => {
   assert.match(music, /EMPTY_VOICE_GRACE_MS = 120_000/);
   assert.match(music, /emptyVoiceAutoPaused = new Set\(\)/);
-  assert.match(music, /player\.pause\(true\)/);
-  assert.match(music, /player\.pause\(false\)/);
+  assert.match(music, /setPlayerPaused\(player,\s*true\)/);
+  assert.match(music, /setPlayerPaused\(player,\s*false\)/);
+  assert.doesNotMatch(music, /\bplayer\.pause\(/);
   assert.match(music, /SOURCE_FAILURE_THRESHOLD = 3/);
   assert.match(music, /heldQueues = new Map\(\)/);
   assert.match(music, /scheduleSourceRetry/);
