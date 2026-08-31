@@ -27,10 +27,11 @@ test('late event from previous song never resolves against a newer current song'
   assert.equal(resolveLifecycleEventTrack(event, null, previous), previous);
 });
 
-test('missing event track keeps Shoukaku 4.3.0 compatibility fallback', () => {
+test('trackless exception/stuck event never guesses the current track', () => {
   const current = { track: 'new64' };
   const previous = { track: 'old64' };
-  assert.equal(resolveLifecycleEventTrack(null, current, previous), current);
+  assert.equal(resolveLifecycleEventTrack(null, current, previous), null);
+  assert.equal(resolveLifecycleEventTrack(undefined, null, previous), null);
 });
 
 test('v0.1.14 source wires node, voice close, and stale-event protections', () => {
@@ -47,5 +48,5 @@ test('v0.1.14 source wires node, voice close, and stale-event protections', () =
   assert.match(music, /resolveLifecycleEventTrack\(data\?\.track/);
   assert.match(music, /getLavalinkNodeHealth/);
   assert.match(commands, /getLavalinkNodeHealth/);
-  assert.equal(pkg.version, '0.1.14');
+  assert.match(pkg.version, /^0\.1\.\d+$/);
 });

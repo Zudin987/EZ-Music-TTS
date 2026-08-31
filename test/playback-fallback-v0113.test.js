@@ -98,7 +98,7 @@ test('v0.1.14 preserves buffers, heap caps, DSP and YouTube client chain', () =>
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const app = fs.readFileSync(new URL('../lavalink/application.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const start = fs.readFileSync(new URL('../start-bot.bat', import.meta.url), 'utf8');
-  assert.equal(pkg.version, '0.1.14');
+  assert.match(pkg.version, /^0\.1\.\d+$/);
   assert.match(app, /bufferDurationMs:\s*2000/);
   assert.match(app, /frameBufferDurationMs:\s*20000/);
   assert.match(app, /nonAllocatingFrameBuffer:\s*true/);

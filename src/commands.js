@@ -26,6 +26,7 @@ import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 import { voiceTransportQuality } from './performance.js';
 import { createSearchPickerRegistry } from './search-picker.js';
 import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';
+import { setPlayerPaused, stopPlayerTrack } from './player-control.js';
 import { resolveSearchChoices, shouldOfferSearchChoices } from './search-choices.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
@@ -156,8 +157,9 @@ async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidat
       try { await player.shoukaku.setPaused(false); } catch { /* stop below still wins */ }
       player.paused = false;
     }
+    await stopPlayerTrack(player);
     player.queue.current = null;
-    player.skip();
+    player.playing = false;
   } else {
     player.paused = false;
     player.playing = false;
@@ -166,10 +168,10 @@ async function stopAndResetPlayer(player, guildId, { setGuildAutoplay, invalidat
   return removed;
 }
 
-function skipCurrent(player) {
+async function skipCurrent(player) {
   requireCurrentTrack(player);
   if (player.loop === 'track') player.setLoop('none');
-  player.skip();
+  await stopPlayerTrack(player);
 }
 
 async function searchTracks(player, query, requester, searchPreferred) {
@@ -706,9 +708,9 @@ async function editLivePanel(interaction, player, notice = null) {
       }
       requireSameVoice(interaction, player);
 
-      if (name === 'pause') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); player.pause(true); checkpointRecovery(player); return privateReply(interaction, 'Paused.'); });
-      if (name === 'resume') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); player.pause(false); checkpointRecovery(player); return privateReply(interaction, 'Resumed.'); });
-      if (name === 'skip') return withGuildOperation(interaction.guildId, async () => { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); checkpointRecovery(player); return privateReply(interaction, 'Skipped.'); });
+      if (name === 'pause') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); await setPlayerPaused(player, true); checkpointRecovery(player); return privateReply(interaction, 'Paused.'); });
+      if (name === 'resume') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); await setPlayerPaused(player, false); checkpointRecovery(player); return privateReply(interaction, 'Resumed.'); });
+      if (name === 'skip') return withGuildOperation(interaction.guildId, async () => { if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); checkpointRecovery(player); return privateReply(interaction, 'Skipped.'); });
       if (name === 'previous') return withGuildOperation(interaction.guildId, async () => {
         const prev = player.getPrevious(false);
         if (!prev) throw new Error('No previous song is available.');
@@ -1023,9 +1025,9 @@ async function handleButton(interaction, api) {
   return withGuildOperation(interaction.guildId, async () => {
     let settle = false;
     let notice = null;
-    if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }
-    else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }
-    else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); settle = true; }
+    if (action === 'pause') { requireCurrentTrack(player); await setPlayerPaused(player, true); }
+    else if (action === 'resume') { requireCurrentTrack(player); await setPlayerPaused(player, false); }
+    else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); settle = true; }
     else if (action === 'previous') {
       const previous = player.getPrevious(false);
       if (!previous) throw new Error('No previous song is available.');

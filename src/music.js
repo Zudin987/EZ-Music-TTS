@@ -17,7 +17,9 @@ import { resolvePreferredSearch } from './source-routing.js';
 import { emptyVoiceTransition } from './performance.js';
 import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQueries, playbackFallbackQuery, restoreFallbackQueue, takeFallbackQueueHold, youtubeTrackId } from './playback-fallback.js';
 import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';
-import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
+import { activeTrackMatchesCurrent } from './playback-start.js';
+import { setPlayerPaused, stopPlayerTrack } from './player-control.js';
+import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceChannelTransition, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -448,7 +450,7 @@ export function createMusic(client, config, gemini) {
         const volume = Math.max(0, Math.min(100, Number(session.volumePercent ?? getStoredVolume(player.guildId, config.defaultVolume))));
         await player.setVolume(volume);
         setStoredVolume(player.guildId, Math.round(volume));
-        if (session.paused) player.pause(true);
+        if (session.paused) await setPlayerPaused(player, true);
         scheduleRecoverySave(player, 0);
       });
 
@@ -628,7 +630,7 @@ export function createMusic(client, config, gemini) {
     scheduleRecoverySave(player, 0);
 
     if (stopCurrent) {
-      try { if (player.queue.current) player.skip(); } catch { /* end event may already be in flight */ }
+      if (player.queue.current) void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));
     }
     scheduleSourceRetry(player);
   }
@@ -657,9 +659,9 @@ export function createMusic(client, config, gemini) {
       try {
         if (player.queue.current) {
           if (player.loop !== 'none') player.setLoop('none');
-          player.skip();
+          void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));
         }
-      } catch (error) { console.warn('[source-protection] skip failed', error?.message || error); }
+      } catch (error) { console.warn('[source-protection] stop scheduling failed', error?.message || error); }
     }
     return state;
   }
@@ -747,7 +749,7 @@ export function createMusic(client, config, gemini) {
 
     if (failedStillCurrent && player.queue.current) {
       if (player.loop !== 'none') player.setLoop('none');
-      player.skip();
+      await stopPlayerTrack(player);
     } else if (player.queue.current && !player.playing && !player.paused && !player.shoukaku?.paused) {
       await player.play();
     }
@@ -927,7 +929,7 @@ export function createMusic(client, config, gemini) {
     }));
   }
 
-  function evaluateVoiceOccupancy(player) {
+  async function evaluateVoiceOccupancy(player) {
     if (!player || music.players.get(player.guildId) !== player) return;
     const guildId = player.guildId;
     const hasHuman = hasHumanListener(player);
@@ -944,10 +946,12 @@ export function createMusic(client, config, gemini) {
       const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);
       if (transition === 'resume' && wasAutoPaused) {
         try {
-          player.pause(false);
+          await setPlayerPaused(player, false);
           scheduleRecoverySave(player, 0);
           console.log(`[voice] human listener returned; auto-resumed ${guildId}`);
+          if (!hasHumanListener(player)) await evaluateVoiceOccupancy(player);
         } catch (error) {
+          emptyVoiceAutoPaused.add(guildId);
           console.warn('[voice] auto-resume failed', error?.message || error);
         }
       }
@@ -956,11 +960,18 @@ export function createMusic(client, config, gemini) {
 
     if (transition === 'pause') {
       try {
-        player.pause(true);
+        await setPlayerPaused(player, true);
+        if (hasHumanListener(player)) {
+          await setPlayerPaused(player, false);
+          emptyVoiceAutoPaused.delete(guildId);
+          scheduleRecoverySave(player, 0);
+          return;
+        }
         emptyVoiceAutoPaused.add(guildId);
         scheduleRecoverySave(player, 0);
         console.log(`[voice] channel empty; auto-paused ${guildId}`);
       } catch (error) {
+        emptyVoiceAutoPaused.delete(guildId);
         console.warn('[voice] auto-pause failed', error?.message || error);
       }
     }
@@ -969,7 +980,7 @@ export function createMusic(client, config, gemini) {
     const timer = setTimeout(async () => {
       emptyVoiceTimers.delete(guildId);
       if (music.players.get(guildId) !== player || hasHumanListener(player)) {
-        evaluateVoiceOccupancy(player);
+        await evaluateVoiceOccupancy(player);
         return;
       }
       emptyVoiceAutoPaused.delete(guildId);
@@ -989,9 +1000,38 @@ export function createMusic(client, config, gemini) {
     const guildId = newState.guild?.id || oldState.guild?.id;
     const player = guildId ? music.players.get(guildId) : null;
     if (!player) return;
+
+    // Shoukaku consumes raw VOICE_STATE_UPDATE packets and follows external bot
+    // moves, but Kazagumo's wrapper voiceId is not updated by that path. Keep EZ's
+    // wrapper/cache synchronized with the state Discord already accepted instead
+    // of sending a second move request back to Discord.
+    if (oldState.id === client.user?.id) {
+      const botTransition = voiceChannelTransition(oldState.channelId, newState.channelId);
+      if (botTransition.kind === 'left') {
+        void retirePlayerForTransportLoss(player, 'Discord moved bot out of voice').catch((error) => {
+          console.warn('[voice] external disconnect cleanup failed', error?.message || error);
+        });
+        return;
+      }
+      if (botTransition.kind === 'moved' || botTransition.kind === 'joined') {
+        const previousVoiceId = botTransition.from;
+        player.voiceId = botTransition.to;
+        voiceIds.set(guildId, botTransition.to);
+        clearVoiceCloseRecoveryTimer(guildId);
+        scheduleRecoverySave(player, 0);
+
+        if (previousVoiceId && previousVoiceId !== botTransition.to) {
+          void client.rest.put(`/channels/${previousVoiceId}/voice-status`, { body: { status: null } }).catch(() => {});
+        }
+        if (player.queue.current) void setVoiceStatus(player, player.queue.current);
+        void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
+        return;
+      }
+    }
+
     const voiceId = player.voiceId || voiceIds.get(guildId);
     if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
-    evaluateVoiceOccupancy(player);
+    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
   });
 
   function lavalinkBaseUrl() {
@@ -1190,6 +1230,14 @@ export function createMusic(client, config, gemini) {
   }
 
   async function handlePlayerStart(player, track) {
+    // Kazagumo emits queue.current for playerStart instead of the TrackStartEvent
+    // payload. A late start from a replaced track can therefore be mislabeled as
+    // the newer queue.current. Shoukaku keeps the actual encoded Lavalink track;
+    // reject any mismatch before it can pollute history/status/recovery state.
+    if (!activeTrackMatchesCurrent(player)) {
+      console.warn('[player-start]', player.guildId, 'stale/mismatched TrackStart ignored');
+      return;
+    }
     clearDisconnect(player.guildId);
     clearEmptyVoiceTimer(player.guildId);
     clearVoiceCloseRecoveryTimer(player.guildId);
@@ -1203,7 +1251,7 @@ export function createMusic(client, config, gemini) {
     stagePlaybackHistory(player, track);
     await setVoiceStatus(player, track);
     scheduleRecoverySave(player, 0);
-    evaluateVoiceOccupancy(player);
+    await evaluateVoiceOccupancy(player);
   }
 
   async function handlePlayerEmpty(player) {

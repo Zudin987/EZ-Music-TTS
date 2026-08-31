@@ -9,6 +9,10 @@ const RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 fs.mkdirSync('data', { recursive: true });
 const db = new Database(path.join('data', 'ez-music.sqlite'));
 db.pragma('journal_mode = WAL');
+// WAL + NORMAL keeps metadata writes fast while preserving database integrity.
+// A sudden power loss may lose the newest transaction, which is acceptable for
+// disposable history/recovery metadata and avoids FULL-mode fsync overhead.
+db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 

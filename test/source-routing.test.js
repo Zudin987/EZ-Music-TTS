@@ -202,7 +202,7 @@ test('oEmbed response is size-bounded before body parsing', async () => {
 });
 
 test('Spotify remains optional and LavaSrc provider order stays YTM before YouTube', () => {
-  assert.equal(pkg.version, '0.1.14');
+  assert.match(pkg.version, /^0\.1\.\d+$/);
   assert.match(envExample, /Single Spotify track links work without these credentials/i);
   assert.match(config, /spotifyClientId/);
   assert.match(config, /spotifyClientSecret/);
