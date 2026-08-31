@@ -1,0 +1,155 @@
+name: Publish v0.1.13
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.13.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PRODUCT_SHA: cba94d6dcb96a6c28b2b17a1c2c1cda0205fc491
+      TAG: v0.1.13
+      PACKAGE_DIR: EZ-Music-v0.1.13
+      ZIP_NAME: EZ-Music-v0.1.13-Windows-Clean.zip
+    steps:
+      - name: Checkout exact tested product commit
+        uses: actions/checkout@v6
+        with:
+          ref: cba94d6dcb96a6c28b2b17a1c2c1cda0205fc491
+          fetch-depth: 1
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(node -p "require('./package.json').version")" = "0.1.13"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build clean Windows package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist "$ZIP_NAME" SHA256SUMS.txt
+          mkdir -p "dist/$PACKAGE_DIR"
+          rsync -a ./ "dist/$PACKAGE_DIR/" \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env' \
+            --exclude='data/' \
+            --exclude='node_modules/' \
+            --exclude='dist/' \
+            --exclude='logs/' \
+            --exclude='*.log' \
+            --exclude='*.sqlite' \
+            --exclude='*.sqlite-*' \
+            --exclude='*.pid' \
+            --exclude='stop.requested' \
+            --exclude='Lavalink.jar' \
+            --exclude='lavalink/Lavalink.jar' \
+            --exclude='lavalink/plugins/'
+
+          cat > "dist/$PACKAGE_DIR/CLEAN-INSTALL.txt" <<'EOF'
+          EZ Music v0.1.13 - Windows clean package
+          =========================================
+
+          Recommended clean upgrade:
+          1. Stop the old bot with stop-bot.bat.
+          2. Back up your existing .env.
+          3. If you want to keep favorites/history/recovery, also back up data\ez-music.sqlite.
+          4. Extract this ZIP to a clean folder (or replace the old program files after backing up the items above).
+          5. Restore .env and, if wanted, data\ez-music.sqlite.
+          6. Run setup.bat.
+          7. Run start-bot.bat.
+
+          Do not copy old node_modules, Lavalink.jar, plugin caches, logs, PID files, or stop.requested into the new install.
+
+          v0.1.13 keeps the existing low-memory/raw-audio profile. No OAuth, remote poToken service, DSP, buffer increase, or heap increase is added.
+          EOF
+
+          # Security/cleanliness gate: release must not contain local runtime state or secrets.
+          forbidden="$(find "dist/$PACKAGE_DIR" -type f \( -name '.env' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.pid' -o -name 'Lavalink.jar' -o -name '*.log' -o -name 'stop.requested' \) -print)"
+          if [ -n "$forbidden" ]; then
+            echo "Forbidden runtime files found in package:"
+            echo "$forbidden"
+            exit 1
+          fi
+
+          test -f "dist/$PACKAGE_DIR/setup.bat"
+          test -f "dist/$PACKAGE_DIR/start-bot.bat"
+          test -f "dist/$PACKAGE_DIR/package.json"
+          test -f "dist/$PACKAGE_DIR/lavalink/application.yml"
+          test -f "dist/$PACKAGE_DIR/CLEAN-INSTALL.txt"
+          test "$(node -p "require('./dist/$PACKAGE_DIR/package.json').version")" = "0.1.13"
+
+          (cd dist && zip -q -r -9 "../$ZIP_NAME" "$PACKAGE_DIR")
+          sha256sum "$ZIP_NAME" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          unzip -l "$ZIP_NAME" | tee /tmp/zip-list.txt >/dev/null
+          if grep -E '(^|/)(\.env|ez-music\.sqlite|Lavalink\.jar|stop\.requested)$|node_modules/|\.log$' /tmp/zip-list.txt; then
+            echo "Release ZIP contains a forbidden file."
+            exit 1
+          fi
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ## EZ Music v0.1.13
+
+          Playback reliability hotfix for the YouTube anonymous-playback failures seen after v0.1.12.
+
+          ### Fixed
+          - Upcoming tracks are now held safely while an alternate-source fallback search is in flight, preventing Kazagumo from advancing/emptying the queue underneath the fallback.
+          - Noisy YouTube titles are reduced to stronger SoundCloud queries (for example `Ado New Genesis`).
+          - SoundCloud fallback uses a small bounded query sequence with timeouts and restores the held queue in order on success.
+          - Manual Skip safely cancels a pending fallback; new queue additions during fallback join the temporary hold instead of racing it.
+          - Recent History now waits for real playback progress, so executor-only YouTube starts that immediately fail are not recorded as successfully heard tracks.
+          - Fallback/source-health state and repeated same-song fallback bookkeeping were tightened during the final audit.
+
+          ### Unchanged performance profile
+          - Single Node process + one local Lavalink process.
+          - No YouTube OAuth or remote poToken/webpo service.
+          - No DSP/EQ/filter/crossfade changes.
+          - No buffer or heap increases.
+          - YouTube client chain remains `MUSIC`, `ANDROID_VR`, `WEB`, `WEBEMBEDDED`.
+
+          The release ZIP is a clean Windows package: it intentionally excludes `.env`, SQLite data, `node_modules`, logs, Lavalink.jar, plugin caches, PID/runtime files, and other local state. Preserve your existing `.env` and optionally `data\ez-music.sqlite` before upgrading.
+          EOF
+
+          gh release create "$TAG" \
+            "$ZIP_NAME" \
+            SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$PRODUCT_SHA" \
+            --title "EZ Music v0.1.13" \
+            --notes-file release-notes.md
+
+      - name: Verify published tag and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets,url
+          echo "### v0.1.13 SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
