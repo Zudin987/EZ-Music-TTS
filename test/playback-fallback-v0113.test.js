@@ -110,3 +110,14 @@ test('v0.1.13 does not change buffers, heap caps, DSP or YouTube client chain', 
   assert.match(start, /-Xmx256M/);
   assert.match(start, /--max-old-space-size=128/);
 });
+
+
+test('fallback status takes priority over an older failure counter and success clears retry fingerprint', () => {
+  const music = fs.readFileSync(new URL('../src/music.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const health = music.split('function getSourceHealth(guildId)')[1]?.split('function setHealthy')[0] || '';
+  assert.ok(health.indexOf('playbackFallbackHolds.has(guildId)') < health.indexOf("if (!state) return"));
+  const youtubeFallback = music.split('async function tryYoutubePlaybackFallback')[1]?.split('async function trySoundCloudPlaybackFallback')[0] || '';
+  const soundcloudFallback = music.split('async function trySoundCloudPlaybackFallback')[1]?.split('async function finishPlaybackFallbackFailure')[0] || '';
+  assert.match(youtubeFallback, /releasePlaybackFallbackHold[\s\S]*playbackFallbackAttempts\.delete\(guildId\)/);
+  assert.match(soundcloudFallback, /releasePlaybackFallbackHold[\s\S]*playbackFallbackAttempts\.delete\(guildId\)/);
+});

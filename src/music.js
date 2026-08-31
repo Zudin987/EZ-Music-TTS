@@ -401,8 +401,17 @@ export function createMusic(client, config, gemini) {
 
   function getSourceHealth(guildId) {
     const state = playbackFailures.get(guildId);
+    // A live alternate-source attempt is more actionable than an older healthy
+    // failure counter. Always surface it while the temporary queue hold exists.
+    if (playbackFallbackHolds.has(guildId)) return {
+      status: 'fallback',
+      failures: state?.times?.length || 0,
+      retryAt: 0,
+      lastError: state?.lastError || '',
+      held: getHeldQueueCount(guildId),
+    };
     if (!state) return {
-      status: playbackFallbackHolds.has(guildId) ? 'fallback' : 'healthy',
+      status: 'healthy',
       failures: 0,
       retryAt: 0,
       lastError: '',
@@ -676,6 +685,9 @@ export function createMusic(client, config, gemini) {
         console.warn(`[playback-fallback] ${guildId}: ${failedTrack.title} failed (${String(message || 'source error').slice(0, 120)}); retrying ${alternative.title} — ${alternative.author || 'Unknown'}`);
         await player.play(alternative, { replaceCurrent: true });
         releasePlaybackFallbackHold(player, state, { restore: true });
+        // A successful substitution is not a retry storm. Allow the same source
+        // item to fall back again immediately if it legitimately appears twice.
+        playbackFallbackAttempts.delete(guildId);
         checkpointRecovery(player);
         return true;
       });
@@ -733,6 +745,9 @@ export function createMusic(client, config, gemini) {
         console.warn(`[playback-fallback] ${guildId}: YouTube unavailable for ${failedTrack.title}; using SoundCloud ${alternative.title} — ${alternative.author || 'Unknown'} via "${matchedQuery}" (${String(message || 'source error').slice(0, 100)})`);
         await player.play(alternative, { replaceCurrent: true });
         releasePlaybackFallbackHold(player, state, { restore: true });
+        // A successful substitution is not a retry storm. Allow the same source
+        // item to fall back again immediately if it legitimately appears twice.
+        playbackFallbackAttempts.delete(guildId);
         checkpointRecovery(player);
         return true;
       });
