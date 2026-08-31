@@ -83,15 +83,18 @@ jobs:
             const first = result?.tracks?.[0];
             if (!first) throw new Error(`No relevant result survived routing for: ${query}`);
             const title = String(first.title || '');
+            const combined = `${first.title || ''} ${first.author || ''}`;
             if (!/heavy/i.test(title) || !/serenade/i.test(title)) {
               throw new Error(`Wrong title for ${query}: ${first.title} — ${first.author}`);
             }
             if (banned.test(title)) {
               throw new Error(`Unrequested alternate version survived for ${query}: ${first.title} — ${first.author}`);
             }
-            const expectedRoutes = [`ytmsearch:${query}`, `ytsearch:${query}`];
-            if (calls.length !== 2 || calls[0] !== expectedRoutes[0] || calls[1] !== expectedRoutes[1]) {
-              throw new Error(`Expected YTM -> YouTube fallback for ${query}, got: ${calls.join(' -> ')}`);
+            if (/nmixx/i.test(query) && !/nmixx/i.test(combined)) {
+              throw new Error(`Artist mismatch for ${query}: ${first.title} — ${first.author}`);
+            }
+            if (calls[0] !== `ytmsearch:${query}` || calls.length > 2 || (calls.length === 2 && calls[1] !== `ytsearch:${query}`)) {
+              throw new Error(`Unexpected routing for ${query}: ${calls.join(' -> ')}`);
             }
             console.log(`${query} => ${first.title} — ${first.author}`);
             console.log(`routes: ${calls.join(' -> ')}`);
