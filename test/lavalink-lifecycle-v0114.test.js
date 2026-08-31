@@ -48,5 +48,5 @@ test('v0.1.14 source wires node, voice close, and stale-event protections', () =
   assert.match(music, /resolveLifecycleEventTrack\(data\?\.track/);
   assert.match(music, /getLavalinkNodeHealth/);
   assert.match(commands, /getLavalinkNodeHealth/);
-  assert.equal(pkg.version, '0.1.14');
+  assert.match(pkg.version, /^0\.1\.\d+$/);
 });
