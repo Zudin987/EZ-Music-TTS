@@ -42,6 +42,39 @@ test('unrelated YTM result does not win a title-only query', async () => {
   assert.equal(result.tracks[0].title, 'Heavy Serenade');
 });
 
+test('unrequested cover or karaoke variants fall through to the original-style result', async () => {
+  const target = searchTarget({
+    ytm: [
+      track('Heavy Serenade (Piano Cover)', 'Pianella Piano'),
+      track('Heavy Serenade (By NMIXX) (Instrumental Karaoke Version)', 'ZZang KARAOKE'),
+    ],
+    yt: [track('NMIXX “Heavy Serenade” M/V', 'JYP Entertainment and NMIXX')],
+  });
+  const result = await resolvePreferredSearch(target, 'heavy serenade nmixx', { id: 'u1' });
+  assert.equal(result.tracks[0].title, 'NMIXX “Heavy Serenade” M/V');
+  assert.deepEqual(target.calls.map((call) => call.source), ['ytmsearch:', 'ytsearch:']);
+});
+
+test('alternate versions stay valid when the user explicitly asks for them', () => {
+  assert.ok(searchTrackScore('heavy serenade instrumental', track('Heavy Serenade (Instrumental)', 'NMIXX')) >= 0.55);
+  assert.ok(searchTrackScore('heavy serenade live', track('Heavy Serenade (Live)', 'NMIXX')) >= 0.55);
+  assert.ok(searchTrackScore('heavy serenade sped up', track('Heavy Serenade (Sped Up)', 'NMIXX')) >= 0.55);
+});
+
+test('unrequested alternate versions score below the acceptance threshold', () => {
+  for (const title of [
+    'Heavy Serenade (Piano Cover)',
+    'Heavy Serenade (Instrumental Karaoke Version)',
+    'Heavy Serenade (Remix)',
+    'Heavy Serenade (Live)',
+    'Heavy Serenade (Acoustic)',
+    'Heavy Serenade (Sped Up)',
+    'Heavy Serenade (Slowed)',
+  ]) {
+    assert.ok(searchTrackScore('heavy serenade', track(title, 'Someone')) < 0.55, title);
+  }
+});
+
 test('good title+artist split stays on YTM without an unnecessary fallback', async () => {
   const target = searchTarget({
     ytm: [track('Abracadabra', 'Lady Gaga')],
