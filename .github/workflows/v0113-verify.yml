@@ -1,0 +1,53 @@
+name: Verify v0.1.13 fallback race fix
+
+on:
+  push:
+    branches:
+      - fix/v0113-fallback-race
+    paths:
+      - .github/workflows/v0113-verify.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/v0113-fallback-race
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Apply focused product patch
+        run: python3 scripts/apply-v0113-fallback.py
+      - name: Locked clean install
+        run: npm ci
+      - name: Syntax checks
+        run: npm run check
+      - name: Full regression suite
+        run: npm test
+      - name: Preserve playback profile
+        run: |
+          set -euo pipefail
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+          grep -q 'soundcloud: true' lavalink/application.yml
+          grep -q '      - MUSIC' lavalink/application.yml
+          grep -q '      - ANDROID_VR' lavalink/application.yml
+          grep -q '      - WEB' lavalink/application.yml
+          grep -q '      - WEBEMBEDDED' lavalink/application.yml
+      - name: Commit verified product changes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md package.json package-lock.json src/music.js src/commands.js src/playback-fallback.js src/playback-history.js test/*.test.js
+          git commit -m "fix: hold queue during alternate-source fallback"
+          git push origin HEAD:fix/v0113-fallback-race
