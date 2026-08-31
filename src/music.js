@@ -15,7 +15,7 @@ import {
 import { radioFallbackHistory, trackKey, truncate } from './utils.js';
 import { resolvePreferredSearch } from './source-routing.js';
 import { emptyVoiceTransition } from './performance.js';
-import { choosePlaybackAlternative, youtubeTrackId } from './playback-fallback.js';
+import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQuery, youtubeTrackId } from './playback-fallback.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -486,11 +486,11 @@ export function createMusic(client, config, gemini) {
   async function tryYoutubePlaybackFallback(player, failedTrack, message) {
     const guildId = player?.guildId;
     const failedId = youtubeTrackId(failedTrack);
-    const title = String(failedTrack?.title || '').trim();
+    const title = playbackFallbackQuery(failedTrack);
     if (!guildId || !failedId || !title || failedTrack?._ezPlaybackFallback) return false;
     if (playbackFallbackInFlight.has(guildId)) return false;
 
-    const fingerprint = `${failedId}:${title.toLowerCase()}`;
+    const fingerprint = `youtube:${failedId}:${title.toLowerCase()}`;
     const previous = playbackFallbackAttempts.get(guildId);
     if (previous?.fingerprint === fingerprint && Date.now() - previous.at < PLAYBACK_FALLBACK_WINDOW_MS) return false;
     playbackFallbackAttempts.set(guildId, { fingerprint, at: Date.now() });
@@ -516,6 +516,42 @@ export function createMusic(client, config, gemini) {
       });
     } catch (error) {
       console.warn('[playback-fallback] alternate video retry failed', error?.message || error);
+      return false;
+    } finally {
+      playbackFallbackInFlight.delete(guildId);
+    }
+  }
+
+  async function trySoundCloudPlaybackFallback(player, failedTrack, message) {
+    const guildId = player?.guildId;
+    const failedId = youtubeTrackId(failedTrack);
+    const title = playbackFallbackQuery(failedTrack);
+    if (!guildId || !failedId || !title || failedTrack?._ezPlaybackFallback) return false;
+    if (playbackFallbackInFlight.has(guildId)) return false;
+
+    const fingerprint = `soundcloud:${failedId}:${title.toLowerCase()}`;
+    const previous = playbackFallbackAttempts.get(guildId);
+    if (previous?.fingerprint === fingerprint && Date.now() - previous.at < PLAYBACK_FALLBACK_WINDOW_MS) return false;
+    playbackFallbackAttempts.set(guildId, { fingerprint, at: Date.now() });
+    playbackFallbackInFlight.add(guildId);
+
+    try {
+      const result = await player.search(title, { requester: failedTrack?.requester || client.user, source: 'scsearch:' });
+      const alternative = chooseSoundCloudAlternative(title, result?.tracks, failedTrack);
+      if (!alternative) return false;
+
+      return await withGuildOperation(guildId, async () => {
+        if (music.players.get(guildId) !== player || player.paused || player.shoukaku?.paused) return false;
+        const currentId = youtubeTrackId(player.queue.current);
+        if (currentId && currentId !== failedId) return false;
+        try { alternative._ezPlaybackFallback = true; } catch { /* track may be sealed */ }
+        console.warn(`[playback-fallback] ${guildId}: YouTube unavailable for ${failedTrack.title}; using SoundCloud ${alternative.title} — ${alternative.author || "Unknown"} (${String(message || "source error").slice(0, 100)})`);
+        await player.play(alternative, { replaceCurrent: true });
+        checkpointRecovery(player);
+        return true;
+      });
+    } catch (error) {
+      console.warn('[playback-fallback] SoundCloud retry failed', error?.message || error);
       return false;
     } finally {
       playbackFallbackInFlight.delete(guildId);
@@ -679,7 +715,13 @@ export function createMusic(client, config, gemini) {
     const failedId = youtubeTrackId(failedTrack);
     console.warn('[player-exception]', player.guildId, message);
     void (async () => {
-      if (await tryYoutubePlaybackFallback(player, failedTrack, message)) return;
+      const credentiallessBlock = isCredentiallessYoutubeBlock(message);
+      if (credentiallessBlock) {
+        if (await trySoundCloudPlaybackFallback(player, failedTrack, message)) return;
+      } else {
+        if (await tryYoutubePlaybackFallback(player, failedTrack, message)) return;
+        if (await trySoundCloudPlaybackFallback(player, failedTrack, message)) return;
+      }
       const currentId = youtubeTrackId(player.queue.current);
       const sameFailedItem = !failedId || !currentId || currentId === failedId;
       recordPlaybackFailure(player, message, { skipCurrent: sameFailedItem });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { resolvePreferredSearch } from '../src/source-routing.js';
 import { isAmbiguousTitleOnlyMatch } from '../src/search-quality.js';
-import { choosePlaybackAlternative } from '../src/playback-fallback.js';
+import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQuery } from '../src/playback-fallback.js';
 
 function track(title, author, identifier, length = 200_000) {
   return { title, author, identifier, uri: `https://www.youtube.com/watch?v=${identifier}`, length };
@@ -55,14 +55,38 @@ test('playback fallback keeps native YouTube order, skips failed id and variant 
   assert.equal(choosePlaybackAlternative('Heavy Serenade', candidates, failed)?.identifier, '6Ycn9qZK09I');
 });
 
-test('v0.1.10 keeps only Opus-capable extra clients and no heap/buffer increase', () => {
+test('fallback query removes YouTube M/V presentation noise without lowering match threshold', () => {
+  const failed = track('NMIXX(엔믹스) “Heavy Serenade” M/V', 'JYP Entertainment and NMIXX', '6Ycn9qZK09I');
+  assert.equal(playbackFallbackQuery(failed), 'NMIXX(엔믹스) “Heavy Serenade”');
+});
+
+test('known credential-free YouTube failures are classified for source fallback', () => {
+  assert.equal(isCredentiallessYoutubeBlock('All clients failed to load the item. Client [WEB] failed: This video requires login.'), true);
+  assert.equal(isCredentiallessYoutubeBlock('No supported audio streams available, available types:'), true);
+  assert.equal(isCredentiallessYoutubeBlock('Video player configuration error'), true);
+  assert.equal(isCredentiallessYoutubeBlock('track stuck (10000 ms)'), false);
+});
+
+test('SoundCloud fallback accepts a relevant standard version and rejects remix noise', () => {
+  const failed = track('NMIXX(엔믹스) “Heavy Serenade” M/V', 'JYP Entertainment and NMIXX', '6Ycn9qZK09I', 205_000);
+  const candidates = [
+    { title: 'NMIXX (엔믹스) “Heavy Serenade” (EDM REMIX)', author: 'Niterit', uri: 'https://soundcloud.com/remix', length: 210_000 },
+    { title: 'NMIXX - Heavy Serenade', author: '求愛する', uri: 'https://soundcloud.com/tezjh7rwwjkl/nmixx-heavy-serenade', length: 205_000 },
+  ];
+  assert.equal(chooseSoundCloudAlternative(playbackFallbackQuery(failed), candidates, failed)?.uri, 'https://soundcloud.com/tezjh7rwwjkl/nmixx-heavy-serenade');
+});
+
+test('v0.1.10 keeps the short YouTube chain and no heap/buffer increase', () => {
   const app = fs.readFileSync(new URL('../lavalink/application.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const section = app.split('  youtube:\n')[1] || '';
   const clients = [...section.matchAll(/^      - ([A-Z0-9_]+)$/gm)].map((m) => m[1]);
-  assert.deepEqual(clients.slice(0, 6), ['MUSIC', 'ANDROID_VR', 'WEB', 'WEBEMBEDDED', 'MWEB', 'ANDROID_MUSIC']);
+  assert.deepEqual(clients.slice(0, 4), ['MUSIC', 'ANDROID_VR', 'WEB', 'WEBEMBEDDED']);
+  assert.ok(!clients.includes('MWEB'));
+  assert.ok(!clients.includes('ANDROID_MUSIC'));
   assert.ok(!clients.includes('IOS'));
   assert.ok(!clients.includes('ANDROID'));
   assert.ok(!clients.includes('TVHTML5_SIMPLY'));
+  assert.ok(app.includes('soundcloud: true'));
   assert.match(app, /bufferDurationMs: 2000/);
   assert.match(app, /frameBufferDurationMs: 20000/);
   assert.match(app, /nonAllocatingFrameBuffer: true/);
@@ -75,6 +99,8 @@ test('playerException attempts alternate video before normal source-protection s
   const music = fs.readFileSync(new URL('../src/music.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const handler = music.split("music.on('playerException'")[1]?.split("music.on('playerResolveError'")[0] || '';
   assert.match(handler, /tryYoutubePlaybackFallback/);
+  assert.match(handler, /trySoundCloudPlaybackFallback/);
+  assert.match(handler, /isCredentiallessYoutubeBlock/);
   assert.match(handler, /recordPlaybackFailure/);
-  assert.ok(handler.indexOf('tryYoutubePlaybackFallback') < handler.indexOf('recordPlaybackFailure'));
+  assert.ok(handler.indexOf('trySoundCloudPlaybackFallback') < handler.indexOf('recordPlaybackFailure'));
 });

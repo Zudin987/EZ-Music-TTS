@@ -96,18 +96,15 @@ plugins:
     allowSearch: true
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
-    # Keep the normal playback path identical to upstream's recommended example,
-    # then add MWEB and ANDROID_MUSIC only as last-resort Opus-capable fallbacks.
-    # They cost nothing once an earlier client succeeds. Regular ANDROID remains
-    # excluded (frequently dysfunctional), IOS remains excluded (no Opus / extra
-    # transcoding), and TVHTML5_SIMPLY stays excluded after prior sign-in/403 issues.
+    # Keep the upstream recommended short chain. Current YouTube login/SABR
+    # blocking can still make all credential-free playback clients fail; EZ Music
+    # handles that at runtime with a relevance-checked SoundCloud audio fallback
+    # instead of adding OAuth, poToken services, transcoding, or more failed clients.
     clients:
       - MUSIC
       - ANDROID_VR
       - WEB
       - WEBEMBEDDED
-      - MWEB
-      - ANDROID_MUSIC
 
 logging:
   level:
