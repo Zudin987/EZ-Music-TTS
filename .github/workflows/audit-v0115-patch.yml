@@ -1,4 +1,4 @@
-name: Temporary v0.1.15 audit patch
+name: Temporary v0.1.15 voice transition patch
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: '22.14.0'
           package-manager-cache: false
-      - name: Apply awaited transport controls
+      - name: Apply Discord voice transition hardening
         shell: python
         run: |
           from pathlib import Path
@@ -30,87 +30,70 @@ jobs:
                   raise SystemExit(f'{label}: expected 1 anchor, found {count}')
               return text.replace(old, new, 1)
 
-          music_path = Path('src/music.js')
-          music = music_path.read_text(encoding='utf-8')
-          music = replace_required(
-              music,
-              "import { activeTrackMatchesCurrent } from './playback-start.js';\n",
-              "import { activeTrackMatchesCurrent } from './playback-start.js';\nimport { setPlayerPaused, stopPlayerTrack } from './player-control.js';\n",
-              'music import',
+          path = Path('src/music.js')
+          text = path.read_text(encoding='utf-8')
+          text = replace_required(
+              text,
+              "import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';",
+              "import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceChannelTransition, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';",
+              'lifecycle import',
           )
-          music = replace_required(music, "        if (session.paused) player.pause(true);", "        if (session.paused) await setPlayerPaused(player, true);", 'recovery pause')
-          music = replace_required(music, "  function evaluateVoiceOccupancy(player) {", "  async function evaluateVoiceOccupancy(player) {", 'occupancy async')
-          music = replace_required(
-              music,
-              "      const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);\n      if (transition === 'resume' && wasAutoPaused) {\n        try {\n          player.pause(false);\n          scheduleRecoverySave(player, 0);\n          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);\n        } catch (error) {\n          console.warn('[voice] auto-resume failed', error?.message || error);\n        }\n      }",
-              "      const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);\n      if (transition === 'resume' && wasAutoPaused) {\n        try {\n          await setPlayerPaused(player, false);\n          scheduleRecoverySave(player, 0);\n          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);\n          if (!hasHumanListener(player)) await evaluateVoiceOccupancy(player);\n        } catch (error) {\n          emptyVoiceAutoPaused.add(guildId);\n          console.warn('[voice] auto-resume failed', error?.message || error);\n        }\n      }",
-              'auto resume',
-          )
-          music = replace_required(
-              music,
-              "    if (transition === 'pause') {\n      try {\n        player.pause(true);\n        emptyVoiceAutoPaused.add(guildId);\n        scheduleRecoverySave(player, 0);\n        console.log(`[voice] channel empty; auto-paused ${guildId}`);\n      } catch (error) {\n        console.warn('[voice] auto-pause failed', error?.message || error);\n      }\n    }",
-              "    if (transition === 'pause') {\n      try {\n        await setPlayerPaused(player, true);\n        if (hasHumanListener(player)) {\n          await setPlayerPaused(player, false);\n          emptyVoiceAutoPaused.delete(guildId);\n          scheduleRecoverySave(player, 0);\n          return;\n        }\n        emptyVoiceAutoPaused.add(guildId);\n        scheduleRecoverySave(player, 0);\n        console.log(`[voice] channel empty; auto-paused ${guildId}`);\n      } catch (error) {\n        emptyVoiceAutoPaused.delete(guildId);\n        console.warn('[voice] auto-pause failed', error?.message || error);\n      }\n    }",
-              'auto pause',
-          )
-          music = replace_required(music, "        evaluateVoiceOccupancy(player);\n        return;", "        await evaluateVoiceOccupancy(player);\n        return;", 'timer reevaluate')
-          music = replace_required(music, "    evaluateVoiceOccupancy(player);\n  });\n\n  function lavalinkBaseUrl", "    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });\n\n  function lavalinkBaseUrl", 'voice-state callback')
-          music = replace_required(music, "    evaluateVoiceOccupancy(player);\n  }\n\n  async function handlePlayerEmpty", "    await evaluateVoiceOccupancy(player);\n  }\n\n  async function handlePlayerEmpty", 'player start occupancy')
-          music = replace_required(
-              music,
-              "      try { if (player.queue.current) player.skip(); } catch { /* end event may already be in flight */ }",
-              "      if (player.queue.current) void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));",
-              'circuit stop',
-          )
-          music = replace_required(
-              music,
-              "          player.skip();\n        }\n      } catch (error) { console.warn('[source-protection] skip failed', error?.message || error); }",
-              "          void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));\n        }\n      } catch (error) { console.warn('[source-protection] stop scheduling failed', error?.message || error); }",
-              'failure stop',
-          )
-          music = replace_required(
-              music,
-              "      player.skip();\n    } else if (player.queue.current && !player.playing && !player.paused && !player.shoukaku?.paused) {",
-              "      await stopPlayerTrack(player);\n    } else if (player.queue.current && !player.playing && !player.paused && !player.shoukaku?.paused) {",
-              'fallback cancel stop',
-          )
-          music_path.write_text(music, encoding='utf-8')
+          old = """  client.on('voiceStateUpdate', (oldState, newState) => {
+    const guildId = newState.guild?.id || oldState.guild?.id;
+    const player = guildId ? music.players.get(guildId) : null;
+    if (!player) return;
+    const voiceId = player.voiceId || voiceIds.get(guildId);
+    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
+    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
+  });"""
+          new = """  client.on('voiceStateUpdate', (oldState, newState) => {
+    const guildId = newState.guild?.id || oldState.guild?.id;
+    const player = guildId ? music.players.get(guildId) : null;
+    if (!player) return;
 
-          commands_path = Path('src/commands.js')
-          commands = commands_path.read_text(encoding='utf-8')
-          commands = replace_required(
-              commands,
-              "import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';\n",
-              "import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';\nimport { setPlayerPaused, stopPlayerTrack } from './player-control.js';\n",
-              'commands import',
-          )
-          commands = replace_required(
-              commands,
-              "    player.queue.current = null;\n    player.skip();",
-              "    await stopPlayerTrack(player);\n    player.queue.current = null;\n    player.playing = false;",
-              'stop reset',
-          )
-          commands = replace_required(
-              commands,
-              "function skipCurrent(player) {\n  requireCurrentTrack(player);\n  if (player.loop === 'track') player.setLoop('none');\n  player.skip();\n}",
-              "async function skipCurrent(player) {\n  requireCurrentTrack(player);\n  if (player.loop === 'track') player.setLoop('none');\n  await stopPlayerTrack(player);\n}",
-              'skip helper',
-          )
-          commands = replace_required(commands, "requireCurrentTrack(player); player.pause(true); checkpointRecovery(player);", "requireCurrentTrack(player); await setPlayerPaused(player, true); checkpointRecovery(player);", 'slash pause')
-          commands = replace_required(commands, "requireCurrentTrack(player); player.pause(false); checkpointRecovery(player);", "requireCurrentTrack(player); await setPlayerPaused(player, false); checkpointRecovery(player);", 'slash resume')
-          commands = replace_required(commands, "if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); checkpointRecovery(player);", "if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); checkpointRecovery(player);", 'slash skip')
-          commands = replace_required(commands, "if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }", "if (action === 'pause') { requireCurrentTrack(player); await setPlayerPaused(player, true); }", 'panel pause')
-          commands = replace_required(commands, "else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }", "else if (action === 'resume') { requireCurrentTrack(player); await setPlayerPaused(player, false); }", 'panel resume')
-          commands = replace_required(commands, "else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); settle = true; }", "else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); settle = true; }", 'panel skip')
-          commands_path.write_text(commands, encoding='utf-8')
+    // Shoukaku consumes raw VOICE_STATE_UPDATE packets and follows external bot
+    // moves, but Kazagumo's wrapper voiceId is not updated by that path. Keep EZ's
+    // wrapper/cache synchronized with the state Discord already accepted instead
+    // of sending a second move request back to Discord.
+    if (oldState.id === client.user?.id) {
+      const botTransition = voiceChannelTransition(oldState.channelId, newState.channelId);
+      if (botTransition.kind === 'left') {
+        void retirePlayerForTransportLoss(player, 'Discord moved bot out of voice').catch((error) => {
+          console.warn('[voice] external disconnect cleanup failed', error?.message || error);
+        });
+        return;
+      }
+      if (botTransition.kind === 'moved' || botTransition.kind === 'joined') {
+        const previousVoiceId = botTransition.from;
+        player.voiceId = botTransition.to;
+        voiceIds.set(guildId, botTransition.to);
+        clearVoiceCloseRecoveryTimer(guildId);
+        scheduleRecoverySave(player, 0);
+
+        if (previousVoiceId && previousVoiceId !== botTransition.to) {
+          void client.rest.put(`/channels/${previousVoiceId}/voice-status`, { body: { status: null } }).catch(() => {});
+        }
+        if (player.queue.current) void setVoiceStatus(player, player.queue.current);
+        void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
+        return;
+      }
+    }
+
+    const voiceId = player.voiceId || voiceIds.get(guildId);
+    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
+    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
+  });"""
+          text = replace_required(text, old, new, 'voice state handler')
+          path.write_text(text, encoding='utf-8')
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - name: Commit product patches
+      - name: Commit product patch
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/music.js src/commands.js
-          git commit -m 'fix: await pause and skip transport operations'
+          git add src/music.js
+          git commit -m 'fix: synchronize externally moved Discord voice state'
           git push origin HEAD:audit/v0.1.15-deep-reliability
