@@ -111,5 +111,5 @@ test('playerException attempts alternate video before normal source-protection s
   assert.match(handler, /trySoundCloudPlaybackFallback/);
   assert.match(handler, /isCredentiallessYoutubeBlock/);
   assert.match(handler, /recordPlaybackFailure/);
-  assert.ok(handler.indexOf('trySoundCloudPlaybackFallback') < handler.indexOf('recordPlaybackFailure'));
+  assert.ok(handler.indexOf('trySoundCloudPlaybackFallback') < handler.indexOf('finishPlaybackFallbackFailure'));
 });

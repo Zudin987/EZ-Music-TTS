@@ -245,6 +245,7 @@ function mb(bytes) {
 function sourceHealthLine(health) {
   if (!health || health.status === 'healthy') return 'Playback source: **Healthy**';
   const held = Number(health.held || 0);
+  if (health.status === 'fallback') return `Playback source: **🔄 Trying SoundCloud fallback**${held ? ` • ${held} queued track${held === 1 ? '' : 's'} held safely` : ''}`;
   const retrySeconds = health.retryAt > Date.now() ? Math.ceil((health.retryAt - Date.now()) / 1000) : 0;
   const label = health.status === 'recovering' ? 'Recovering' : 'Degraded';
   return `Playback source: **⚠️ ${label}**${held ? ` • ${held} track${held === 1 ? '' : 's'} preserved` : ''}${retrySeconds ? ` • retry in ~${retrySeconds}s` : ''}`;
@@ -393,6 +394,7 @@ export function createInteractionHandler({
   clearRecoverySession,
   getRecoverableSession,
   resumeRecoverySession,
+  cancelPlaybackFallbackForSkip,
   searchPreferred,
   isSpotifyConfigured,
 }) {
@@ -511,7 +513,7 @@ async function editLivePanel(interaction, player, notice = null) {
 
   const componentApi = {
     music, gemini, ensurePlayer, queueTracks, queueLimit, setGuildAutoplay, getGuildAutoplay, setGuildVolume,
-    invalidateQueueWork, isQueueRevisionCurrent, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession,
+    invalidateQueueWork, isQueueRevisionCurrent, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession, cancelPlaybackFallbackForSkip,
     withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,
     queueLibraryRow, restoreUndo, livePanels, editLivePanel,
   };
@@ -700,7 +702,7 @@ async function editLivePanel(interaction, player, notice = null) {
 
       if (name === 'pause') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); player.pause(true); checkpointRecovery(player); return privateReply(interaction, 'Paused.'); });
       if (name === 'resume') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); player.pause(false); checkpointRecovery(player); return privateReply(interaction, 'Resumed.'); });
-      if (name === 'skip') return withGuildOperation(interaction.guildId, async () => { skipCurrent(player); checkpointRecovery(player); return privateReply(interaction, 'Skipped.'); });
+      if (name === 'skip') return withGuildOperation(interaction.guildId, async () => { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); checkpointRecovery(player); return privateReply(interaction, 'Skipped.'); });
       if (name === 'previous') return withGuildOperation(interaction.guildId, async () => {
         const prev = player.getPrevious(false);
         if (!prev) throw new Error('No previous song is available.');
@@ -829,7 +831,7 @@ async function handleModalSubmit(interaction, { music, getGuildAutoplay, withGui
 async function handleButton(interaction, api) {
   const {
     music, gemini, ensurePlayer, queueTracks, queueLimit, setGuildAutoplay, getGuildAutoplay, setGuildVolume,
-    invalidateQueueWork, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession,
+    invalidateQueueWork, discardHeldQueue, getHeldQueueSnapshot, clearRecoverySession, getRecoverableSession, resumeRecoverySession, cancelPlaybackFallbackForSkip,
     withGuildOperation, checkpointRecovery, panelPayload, queuePayload, getHistoryPayload, getFavoritesPayload,
     queueLibraryRow, restoreUndo, livePanels, editLivePanel,
   } = api;
@@ -1017,7 +1019,7 @@ async function handleButton(interaction, api) {
     let notice = null;
     if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }
     else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }
-    else if (action === 'skip') { skipCurrent(player); settle = true; }
+    else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); settle = true; }
     else if (action === 'previous') {
       const previous = player.getPrevious(false);
       if (!previous) throw new Error('No previous song is available.');
