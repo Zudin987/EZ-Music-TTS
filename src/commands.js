@@ -26,6 +26,7 @@ import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 import { voiceTransportQuality } from './performance.js';
 import { createSearchPickerRegistry } from './search-picker.js';
 import { ensureQueuedPlayback } from './playback-start.js';
+import { resolveSearchChoices, shouldOfferSearchChoices } from './search-choices.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
 const PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications;
@@ -36,8 +37,8 @@ const searchPickers = createSearchPickerRegistry();
 const undoSnapshots = new Map();
 
 export const commandDefinitions = [
-  new SlashCommandBuilder().setName('play').setDescription('Play or queue a song/playlist').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)).addBooleanOption(o => o.setName('select').setDescription('Privately choose from the top search results')),
-  new SlashCommandBuilder().setName('playnext').setDescription('Put a song/playlist directly after the current song').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)).addBooleanOption(o => o.setName('select').setDescription('Privately choose from the top search results')),
+  new SlashCommandBuilder().setName('play').setDescription('Play or queue a song/playlist').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)),
+  new SlashCommandBuilder().setName('playnext').setDescription('Put a song/playlist directly after the current song').addStringOption(o => o.setName('query').setDescription('Song name or URL').setRequired(true).setMaxLength(1000)),
   new SlashCommandBuilder().setName('pause').setDescription('Pause playback'),
   new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
   new SlashCommandBuilder().setName('skip').setDescription('Skip the current song'),
@@ -356,8 +357,9 @@ function helpText() {
     '`/nowplaying` is the only public response and is sent with Discord silent-notification flags; all commands, detailed menus, confirmations, and errors stay private.',
     'The player auto-refreshes about every 10 seconds for up to ~14 minutes; Refresh or Back starts a fresh live window.',
     'Queue Manager: select tracks, Remove / Move Next / Play Now / Dedupe, with a 5-minute Undo for clear/remove/dedupe.',
-    'More: seek/replay plus Favorites and Recent History. `/play select:true` privately lets you choose an exact search result.',
-    'Plain-text song searches prefer relevant YouTube Music matches, then fall back to normal YouTube. Single Spotify tracks also work without Spotify app credentials.',
+    'More: seek/replay plus Favorites and Recent History.',
+    'Typed `/play` and `/playnext` searches show 3 private choices before anything is queued. The choices combine a YouTube lyrics-biased search, YouTube Music, and normal YouTube.',
+    'Direct YouTube/Spotify/SoundCloud links play immediately. Single Spotify tracks also work without Spotify app credentials.',
     '`/status` offers Resume/Discard when a recent crash/restart session is recoverable.',
     '`/clear` keeps the current song playing, clears everything upcoming, and turns loop/autoplay off.',
     '`/stop` fully resets current/upcoming/previous state. Volume stays saved until changed again.',
@@ -586,15 +588,19 @@ async function editLivePanel(interaction, player, notice = null) {
         await privateDefer(interaction);
         const query = interaction.options.getString('query', true);
         const next = name === 'playnext';
-        if (interaction.options.getBoolean('select') === true) {
-          const result = await searchPreferred(music, query, interaction.user);
-          if (!result?.tracks?.length) throw new Error(`No results for: ${truncate(query, 120)}`);
-          if (result.type !== 'PLAYLIST' && result.tracks.length > 1) {
-            const token = createSearchPicker(interaction, result.tracks, next, getQueueRevision(interaction.guildId));
-            return interaction.editReply(searchPickerPayload(token, result.tracks, next ? 'next' : 'play'));
-          }
-          // A playlist/direct URL has one unambiguous target; queue it normally.
+
+        // Typed searches are intentionally selection-first. Search metadata before
+        // connecting to voice so a user can cancel without creating a player.
+        // Direct URLs and explicit source prefixes keep immediate expert behavior.
+        if (shouldOfferSearchChoices(query)) {
+          const choices = await resolveSearchChoices(music, query, interaction.user, { limit: 3 });
+          if (!choices.length) throw new Error(`No relevant results for: ${truncate(query, 120)}`);
+          const tracks = choices.map((choice) => choice.track);
+          const hints = choices.map((choice) => choice.kind);
+          const token = createSearchPicker(interaction, tracks, next, getQueueRevision(interaction.guildId));
+          return interaction.editReply(searchPickerPayload(token, tracks, next ? 'next' : 'play', hints));
         }
+
         const player = await ensurePlayer(interaction);
         const revision = getQueueRevision(interaction.guildId);
         const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);

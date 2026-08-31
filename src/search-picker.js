@@ -30,7 +30,7 @@ export function createSearchPickerRegistry({
     entries.set(token, {
       guildId: String(guildId || ''),
       userId: String(userId || ''),
-      tracks: Array.isArray(tracks) ? tracks.slice(0, 5) : [],
+      tracks: Array.isArray(tracks) ? tracks.slice(0, 3) : [],
       next: Boolean(next),
       revision: Number(revision) || 0,
       expiresAt: safeNow + safeTtl,

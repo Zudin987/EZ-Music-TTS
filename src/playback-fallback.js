@@ -11,6 +11,13 @@ export function youtubeTrackId(track) {
 export function playbackFallbackQuery(track) {
   return String(track?.title || '')
     .replace(/\bM\s*\/\s*V\b/gi, ' ')
+    .replace(/\b(?:official\s+)?(?:music\s+)?video\b/gi, ' ')
+    .replace(/\bcolor\s+coded\s+lyrics?\b/gi, ' ')
+    .replace(/\blyric\s+video\b/gi, ' ')
+    .replace(/\blyrics?\b/gi, ' ')
+    .replace(/\b(?:official\s+)?audio\b/gi, ' ')
+    .replace(/[()[\]{}“”"']/g, ' ')
+    .replace(/\s*[-–—|•]\s*$/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }

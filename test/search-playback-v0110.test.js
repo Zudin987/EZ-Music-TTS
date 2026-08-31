@@ -55,9 +55,18 @@ test('playback fallback keeps native YouTube order, skips failed id and variant 
   assert.equal(choosePlaybackAlternative('Heavy Serenade', candidates, failed)?.identifier, '6Ycn9qZK09I');
 });
 
-test('fallback query removes YouTube M/V presentation noise without lowering match threshold', () => {
-  const failed = track('NMIXX(엔믹스) “Heavy Serenade” M/V', 'JYP Entertainment and NMIXX', '6Ycn9qZK09I');
-  assert.equal(playbackFallbackQuery(failed), 'NMIXX(엔믹스) “Heavy Serenade”');
+test('fallback query removes YouTube presentation labels before alternate-source lookup', () => {
+  const variants = [
+    'NMIXX(엔믹스) “Heavy Serenade” M/V',
+    'NMIXX(엔믹스) “Heavy Serenade” (Official Audio)',
+    "NMIXX (엔믹스) 'Heavy Serenade' (Color Coded Lyrics)",
+    'NMIXX(엔믹스) Heavy Serenade Lyric Video',
+    'NMIXX(엔믹스) Heavy Serenade Official Music Video',
+  ];
+  for (const title of variants) {
+    const failed = track(title, 'NMIXX', '6Ycn9qZK09I');
+    assert.equal(playbackFallbackQuery(failed), 'NMIXX 엔믹스 Heavy Serenade', title);
+  }
 });
 
 test('known credential-free YouTube failures are classified for source fallback', () => {
