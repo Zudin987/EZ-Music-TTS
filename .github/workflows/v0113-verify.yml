@@ -6,6 +6,7 @@ on:
       - fix/v0113-fallback-race
     paths:
       - .github/workflows/v0113-verify.yml
+      - scripts/refine-v0113.py
 
 permissions:
   contents: write
@@ -23,7 +24,9 @@ jobs:
           node-version: 22.14.0
           package-manager-cache: false
       - name: Apply focused product patch
-        run: python3 scripts/apply-v0113-fallback.py
+        run: |
+          python3 scripts/apply-v0113-fallback.py
+          python3 scripts/refine-v0113.py
       - name: Locked clean install
         run: npm ci
       - name: Syntax checks
