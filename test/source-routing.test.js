@@ -41,7 +41,7 @@ function fakeOEmbed({ title = 'Never Gonna Give You Up', type = 'track', id = '4
 }
 
 test('plain text routing uses YTM first and skips YouTube when YTM succeeds', async () => {
-  const target = fakeTarget(async (_query, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: 'Rose' }] : [] }));
+  const target = fakeTarget(async (_query, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: 'Rose', author: 'D.O' }] : [] }));
   const result = await resolvePreferredSearch(target, 'D.O Rose', { id: 'u1' });
   assert.equal(result.tracks[0].title, 'Rose');
   assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:']);
@@ -54,11 +54,11 @@ test('YTM empty/error falls back once to YouTube search', async () => {
         if (mode === 'error') throw new Error('ytm unavailable');
         return { tracks: [] };
       }
-      if (options.source === 'ytsearch:') return { tracks: [{ title: 'fallback' }] };
+      if (options.source === 'ytsearch:') return { tracks: [{ title: 'D.O - Rose', author: 'D.O' }] };
       throw new Error('unexpected route');
     });
     const result = await resolvePreferredSearch(target, 'D.O Rose', null);
-    assert.equal(result.tracks[0].title, 'fallback');
+    assert.equal(result.tracks[0].title, 'D.O - Rose');
     assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:', 'ytsearch:']);
   }
 });
@@ -148,7 +148,7 @@ test('configured but unusable Spotify track automatically falls back through oEm
   const oembed = fakeOEmbed();
   const target = fakeTarget(async (_query, options, callNumber) => {
     if (callNumber === 1) throw new Error('Spotify API unavailable');
-    if (options.source === 'ytmsearch:') return { tracks: [{ title: 'fallback mirror' }] };
+    if (options.source === 'ytmsearch:') return { tracks: [{ title: 'Never Gonna Give You Up', author: 'Rick Astley' }] };
     return { tracks: [] };
   });
   const result = await resolvePreferredSearch(
@@ -157,7 +157,7 @@ test('configured but unusable Spotify track automatically falls back through oEm
     { id: 'u1' },
     { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } },
   );
-  assert.equal(result.tracks[0].title, 'fallback mirror');
+  assert.equal(result.tracks[0].title, 'Never Gonna Give You Up');
   assert.equal(oembed.calls.length, 1);
   assert.deepEqual(target.calls.map((call) => call.options.source), [undefined, 'ytmsearch:']);
 });
@@ -200,7 +200,7 @@ test('oEmbed response is size-bounded before body parsing', async () => {
 });
 
 test('Spotify remains optional and LavaSrc provider order stays YTM before YouTube', () => {
-  assert.equal(pkg.version, '0.1.8');
+  assert.equal(pkg.version, '0.1.9');
   assert.match(envExample, /Single Spotify track links work without these credentials/i);
   assert.match(config, /spotifyClientId/);
   assert.match(config, /spotifyClientSecret/);
