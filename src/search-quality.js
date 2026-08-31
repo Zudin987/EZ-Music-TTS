@@ -3,15 +3,43 @@ const SEARCH_NOISE = new Set([
   'music', 'topic', 'vevo', 'feat', 'ft', 'featuring',
 ]);
 
-function tokens(value) {
-  const normalized = String(value || '')
+const VARIANT_PATTERNS = [
+  ['cover'],
+  ['karaoke'],
+  ['instrumental'],
+  ['remix'],
+  ['acoustic'],
+  ['nightcore'],
+  ['slowed'],
+  ['live'],
+  ['sped', 'up'],
+];
+
+function rawTokens(value) {
+  return String(value || '')
     .normalize('NFKD')
     .toLowerCase()
     .replace(/\p{M}/gu, '')
-    .replace(/&/g, ' and ');
-  const found = normalized.match(/[\p{L}\p{N}]+/gu) || [];
+    .replace(/&/g, ' and ')
+    .match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+function tokens(value) {
+  const found = rawTokens(value);
   const filtered = found.filter((token) => !SEARCH_NOISE.has(token));
   return filtered.length ? [...new Set(filtered)] : [...new Set(found)];
+}
+
+function includesPattern(tokenSet, pattern) {
+  return pattern.every((token) => tokenSet.has(token));
+}
+
+function hasUnrequestedVariant(query, title) {
+  const queryTokens = new Set(rawTokens(query));
+  const titleTokens = new Set(rawTokens(title));
+  return VARIANT_PATTERNS.some((pattern) => (
+    includesPattern(titleTokens, pattern) && !includesPattern(queryTokens, pattern)
+  ));
 }
 
 function coverage(queryTokens, candidateTokens) {
@@ -30,7 +58,13 @@ export function searchTrackScore(query, track) {
   const combined = [...new Set([...titleTokens, ...authorTokens])];
   const combinedCoverage = coverage(queryTokens, combined);
   const titleCoverage = coverage(queryTokens, titleTokens);
-  return Math.min(1, (combinedCoverage * 0.75) + (titleCoverage * 0.25));
+  let score = Math.min(1, (combinedCoverage * 0.75) + (titleCoverage * 0.25));
+
+  // A cover/karaoke/instrumental/etc. can have a perfect title match while still
+  // being the wrong version. Prefer the standard/original result unless the user
+  // explicitly asked for that variant.
+  if (hasUnrequestedVariant(query, track?.title)) score *= 0.4;
+  return score;
 }
 
 export function rankSearchResult(result, query) {
