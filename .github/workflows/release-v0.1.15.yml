@@ -1,0 +1,167 @@
+name: Publish v0.1.15
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.15.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PRODUCT_SHA: d7656ee271d337b222e74e36e778e0447efad5ae
+      TAG: v0.1.15
+      PACKAGE_DIR: EZ-Music-v0.1.15
+      ZIP_NAME: EZ-Music-v0.1.15-Windows-Clean.zip
+    steps:
+      - name: Checkout exact tested product commit
+        uses: actions/checkout@v6
+        with:
+          ref: d7656ee271d337b222e74e36e778e0447efad5ae
+          fetch-depth: 1
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(node -p "require('./package.json').version")" = "0.1.15"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build clean Windows package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist "$ZIP_NAME" SHA256SUMS.txt
+          mkdir -p "dist/$PACKAGE_DIR"
+          rsync -a ./ "dist/$PACKAGE_DIR/" \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env' \
+            --exclude='data/' \
+            --exclude='node_modules/' \
+            --exclude='dist/' \
+            --exclude='logs/' \
+            --exclude='*.log' \
+            --exclude='*.sqlite' \
+            --exclude='*.sqlite-*' \
+            --exclude='*.pid' \
+            --exclude='stop.requested' \
+            --exclude='Lavalink.jar' \
+            --exclude='lavalink/Lavalink.jar' \
+            --exclude='lavalink/plugins/'
+
+          cat > "dist/$PACKAGE_DIR/CLEAN-INSTALL.txt" <<'EOF'
+          EZ Music v0.1.15 - Windows clean package
+          =========================================
+
+          Recommended clean upgrade:
+          1. Stop the old bot with stop-bot.bat.
+          2. Back up your existing .env.
+          3. If you want to keep favorites/history/recovery, also back up data\ez-music.sqlite.
+          4. Extract this ZIP to a clean folder (or replace old program files after backing up the items above).
+          5. Restore .env and, if wanted, data\ez-music.sqlite.
+          6. Run setup.bat.
+          7. Run start-bot.bat.
+
+          Do not copy old node_modules, Lavalink.jar, plugin caches, logs, PID files, or stop.requested into the new install.
+
+          v0.1.15 hardens playback/voice lifecycle races, makes pause/skip transport failures observable instead of process-fatal, improves SQLite metadata write efficiency, filters SoundCloud preview-only fallbacks, and gives graceful Windows shutdown enough time for Lavalink REST cleanup. It keeps the existing low-memory/raw-audio profile and the Windows-compatible better-sqlite3 12.11.1 package.
+          EOF
+
+          forbidden="$(find "dist/$PACKAGE_DIR" -type f \( -name '.env' -o -name '*.sqlite' -o -name '*.sqlite-*' -o -name '*.pid' -o -name 'Lavalink.jar' -o -name '*.log' -o -name 'stop.requested' \) -print)"
+          if [ -n "$forbidden" ]; then
+            echo "Forbidden runtime files found in package:"
+            echo "$forbidden"
+            exit 1
+          fi
+
+          test -f "dist/$PACKAGE_DIR/setup.bat"
+          test -f "dist/$PACKAGE_DIR/start-bot.bat"
+          test -f "dist/$PACKAGE_DIR/package.json"
+          test -f "dist/$PACKAGE_DIR/lavalink/application.yml"
+          test -f "dist/$PACKAGE_DIR/CLEAN-INSTALL.txt"
+          test "$(node -p "require('./dist/$PACKAGE_DIR/package.json').version")" = "0.1.15"
+
+          (cd dist && zip -q -r -9 "../$ZIP_NAME" "$PACKAGE_DIR")
+          sha256sum "$ZIP_NAME" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          unzip -l "$ZIP_NAME" | tee /tmp/zip-list.txt >/dev/null
+          if grep -E '(^|/)(\.env|ez-music\.sqlite|Lavalink\.jar|stop\.requested)$|node_modules/|\.log$' /tmp/zip-list.txt; then
+            echo "Release ZIP contains a forbidden file."
+            exit 1
+          fi
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ## EZ Music v0.1.15
+
+          Reliability and low-overhead runtime hardening based on a deep audit of playback, Lavalink, Discord voice, queue, shutdown, and Windows lifecycle behavior.
+
+          ### Fixed
+          - Pause, resume, skip, stop, empty-room auto-pause/resume, and source-protection STOPs now await Shoukaku/Lavalink transport operations instead of using Kazagumo's fire-and-forget wrappers. A temporary Lavalink REST failure can now be handled normally instead of escaping as a fatal unhandled rejection.
+          - TrackException/TrackStuck handling no longer guesses that a trackless/late event belongs to the current song.
+          - TrackStart is cross-checked against Shoukaku's actual encoded active track before updating history, voice status, or recovery, preventing late replaced-track starts from being attributed to a newer song.
+          - Discord-admin bot moves now synchronize EZ's cached voice channel without sending a redundant move request; forced voice disconnects preserve recovery and retire stale player state safely.
+          - Empty-room auto-pause/resume rechecks occupancy around asynchronous REST operations to avoid leaving playback paused if a listener returns mid-request.
+
+          ### Performance and resilience
+          - SQLite remains WAL-backed and now uses `synchronous=NORMAL`, reducing unnecessary fsync overhead for local favorites/history/recovery metadata.
+          - SoundCloud preview-only results are filtered before emergency fallback selection.
+          - Windows graceful shutdown now waits up to about 25 seconds before verified force-kill fallback, exceeding the configured 20-second Lavalink REST timeout.
+          - Syntax validation now includes configuration and the centralized awaited player-control module.
+          - `better-sqlite3` remains at the proven Windows-prebuilt 12.11.1 version. A v13 trial was rejected by Windows CI because it required node-gyp/Visual Studio compilation on Node 22.14.
+
+          ### Validation
+          - Full regression suite: 163/163 passed.
+          - Pull-request CI passed on Ubuntu and Windows.
+          - Standalone Lavalink + YouTube/LavaSrc smoke test passed.
+          - Post-merge `main` CI passed on Ubuntu, Windows, and standalone Lavalink smoke.
+
+          ### Unchanged low-memory/audio architecture
+          - Single Node process + one local native Lavalink process.
+          - Java heap remains `-Xms64M -Xmx256M`.
+          - Node heap cap remains `--max-old-space-size=128`.
+          - Lavalink buffers remain 2s source / 20s frame with non-allocating frame buffer.
+          - DSP remains disabled except normal volume.
+          - No extra Lavalink node, Redis/MongoDB, Docker/WSL requirement, browser dashboard, helper daemon, OAuth, or remote poToken service.
+
+          The Windows ZIP is a clean package and intentionally excludes `.env`, SQLite data, `node_modules`, logs, Lavalink.jar, plugin caches, PID/runtime files, and other local state. Preserve `.env` and optionally `data\ez-music.sqlite` before upgrading.
+          EOF
+
+          gh release create "$TAG" \
+            "$ZIP_NAME" \
+            SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$PRODUCT_SHA" \
+            --title "EZ Music v0.1.15" \
+            --notes-file release-notes.md
+
+      - name: Verify published tag and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft,isPrerelease,assets,url
+          echo "### v0.1.15 SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
