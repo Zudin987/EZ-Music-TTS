@@ -1,0 +1,135 @@
+name: Publish EZ Music v0.1.12
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.12.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: c231ef449525f5298de203e4b1c4270f56f53c45
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./package.json').version")" = "0.1.12"
+          test -f package-lock.json
+          test -f test/playback-start-v0112.test.js
+          grep -q 'activeTrackMatchesCurrent' src/playback-start.js
+          grep -q 'activeTrackMatchesCurrent' src/commands.js
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+          npm ci
+          npm run check
+          npm test
+
+      - name: Build clean Windows install ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v0.1.12"
+          ROOT="dist/EZ-Music"
+          mkdir -p "$ROOT/src" "$ROOT/lavalink"
+
+          cp README.md package.json package-lock.json .env.example setup.bat start-bot.bat start-hidden.vbs stop-bot.bat install-autostart.bat install-autostart.ps1 remove-autostart.bat "$ROOT/"
+          cp src/*.js "$ROOT/src/"
+          cp lavalink/application.yml "$ROOT/lavalink/"
+
+          cat > "$ROOT/CLEAN-INSTALL.txt" <<'EOF'
+          EZ MUSIC v0.1.12 CLEAN WINDOWS INSTALL
+          =====================================
+          1. Stop EZ Music.
+          2. Back up C:\EZ-Music\.env.
+          3. If you want to preserve volume, favorites, history and crash/restart recovery,
+             also back up C:\EZ-Music\data\ez-music.sqlite.
+          4. Remove or rename the old C:\EZ-Music folder for a truly clean install.
+          5. Extract this ZIP so the app lives at C:\EZ-Music.
+          6. Restore your backed-up .env to C:\EZ-Music\.env.
+          7. Restore data\ez-music.sqlite only if you intentionally backed it up.
+          8. Run setup.bat.
+          9. Test with start-bot.bat.
+          10. When satisfied, use start-hidden.vbs; reinstall Task Scheduler only if needed.
+
+          GHOST PLAYBACK FIX
+          ------------------
+          - Fixes a v0.1.11 state where the Now Playing panel could show a newly selected
+            song at 0:00 while no audio was sent to Lavalink.
+          - EZ Music now requires Lavalink/Shoukaku's active encoded track to exactly match
+            Kazagumo's current encoded queue track before considering playback active.
+          - A stale encoded track left from an earlier failed/replaced source now forces one
+            real playback start, allowing the existing YouTube -> SoundCloud fallback to run.
+          - /nowplaying can recover this stale-track state and /status no longer labels a
+            mismatched ghost track as Playing.
+          - Manual /pause remains protected from automatic resume.
+
+          STABILITY / MEMORY POLICY UNCHANGED
+          -----------------------------------
+          This is a playback-state fix only. YouTube clients, SoundCloud fallback, DSP,
+          buffering, Java/Node heap caps, queue limits and SQLite persistence are unchanged.
+          Lavalink remains capped at 256 MB Java heap and Node at 128 MB heap. Buffering
+          remains 2s / 20s with nonAllocatingFrameBuffer enabled.
+
+          This package intentionally contains no .env, real secrets, SQLite database,
+          node_modules, logs, PID files or Lavalink.jar. setup.bat installs locked Node
+          dependencies from package-lock.json and downloads/verifies Lavalink.jar.
+          EOF
+
+          cd dist
+          zip -r -9 "EZ-Music-${VERSION}-Windows-Clean.zip" EZ-Music >/dev/null
+          sha256sum "EZ-Music-${VERSION}-Windows-Clean.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Preserve exact release bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: EZ-Music-v0.1.12-release
+          path: |
+            dist/EZ-Music-v0.1.12-Windows-Clean.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.12 >/dev/null 2>&1; then
+            echo "Release v0.1.12 already exists; leaving it unchanged."
+          else
+            gh release create v0.1.12 \
+              dist/EZ-Music-v0.1.12-Windows-Clean.zip \
+              dist/SHA256SUMS.txt \
+              --target c231ef449525f5298de203e4b1c4270f56f53c45 \
+              --title "EZ Music v0.1.12" \
+              --notes "Playback-state hotfix. Fixes a v0.1.11 ghost Now Playing state where a newly selected song could appear at 0:00 without audio because a stale non-empty Shoukaku track from the previous item suppressed player.play(). EZ Music now requires the active Lavalink/Shoukaku encoded track to exactly match Kazagumo queue.current before playback is considered active. Mismatches force one real start, which also allows the existing credential-free YouTube failure -> SoundCloud fallback to run. /nowplaying recovery and /status use the same exact-match logic. Manual pause protection remains unchanged. No YouTube client, SoundCloud, DSP, buffer, heap, process, queue or persistence settings changed. PR #14 plus Windows, Ubuntu and standalone Lavalink CI passed."
+          fi
+
+      - name: Remove merged feature branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin --delete fix/v0112-ghost-playback-start || true
