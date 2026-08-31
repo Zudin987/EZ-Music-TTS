@@ -1,0 +1,56 @@
+name: Temporary v0.1.15 audit patch
+
+on:
+  push:
+    branches: [audit/v0.1.15-deep-reliability]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: audit/v0.1.15-deep-reliability
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - name: Apply stale TrackStart guard
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('src/music.js')
+          text = path.read_text(encoding='utf-8')
+          import_needle = "import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';\n"
+          import_repl = import_needle + "import { activeTrackMatchesCurrent } from './playback-start.js';\n"
+          if "import { activeTrackMatchesCurrent } from './playback-start.js';" not in text:
+              if import_needle not in text:
+                  raise SystemExit('playback-history import anchor not found')
+              text = text.replace(import_needle, import_repl, 1)
+          handler_needle = "  async function handlePlayerStart(player, track) {\n    clearDisconnect(player.guildId);\n"
+          handler_repl = "  async function handlePlayerStart(player, track) {\n    // Kazagumo emits queue.current for playerStart instead of the TrackStartEvent\n    // payload. A late start from a replaced track can therefore be mislabeled as\n    // the newer queue.current. Shoukaku keeps the actual encoded Lavalink track;\n    // reject any mismatch before it can pollute history/status/recovery state.\n    if (!activeTrackMatchesCurrent(player)) {\n      console.warn('[player-start]', player.guildId, 'stale/mismatched TrackStart ignored');\n      return;\n    }\n    clearDisconnect(player.guildId);\n"
+          if "stale/mismatched TrackStart ignored" not in text:
+              if handler_needle not in text:
+                  raise SystemExit('handlePlayerStart anchor not found')
+              text = text.replace(handler_needle, handler_repl, 1)
+          path.write_text(text, encoding='utf-8')
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Commit product patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/music.js
+          if git diff --cached --quiet; then
+            echo 'Patch already applied.'
+            exit 0
+          fi
+          git commit -m 'fix: ignore stale mislabeled TrackStart events'
+          git push origin HEAD:audit/v0.1.15-deep-reliability
