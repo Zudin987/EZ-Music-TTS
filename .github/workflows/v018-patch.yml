@@ -25,11 +25,11 @@ jobs:
           node-version: '22.14.0'
           cache: npm
 
-      - name: Finalize docs and version
+      - name: Apply final audited status fix
         run: |
           set -euo pipefail
           node tools/v018-patch.mjs
-          npm version 0.1.8 --no-git-tag-version
+          test "$(node -p "require('./package.json').version")" = "0.1.8"
 
       - name: Install locked dependencies
         run: npm ci
@@ -54,17 +54,17 @@ jobs:
           grep -q -- '--max-old-space-size=128' start-bot.bat
           git diff --check
 
-      - name: Commit verified finalize changes
+      - name: Commit verified status fix
         run: |
           set -euo pipefail
           git config user.name "MrEz"
           git config user.email "39240221+Zudin987@users.noreply.github.com"
-          git add README.md package.json package-lock.json
+          git add src/commands.js
           if git diff --cached --quiet; then
-            echo 'No finalize changes to commit.'
+            echo 'No status change to commit.'
           else
-            git commit -m 'chore: finalize v0.1.8 metadata and docs'
+            git commit -m 'fix: report credential-free Spotify track fallback in status'
             git push origin HEAD:feat/v018-spotify-oembed-performance
           fi
 
-      # This workflow is temporary and removed before the PR is opened.
+      # Temporary verification workflow; removed before PR.
