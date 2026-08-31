@@ -19,6 +19,14 @@ const TITLE_VARIANT_PATTERNS = [
   ['inkigayo'],
   ['countdown'],
   ['music', 'bank'],
+  ['hidden', 'vocals'],
+  ['vocals', 'louder'],
+  ['bass', 'boosted'],
+  ['line', 'distribution'],
+  ['fanmade'],
+  ['fan', 'made'],
+  ['edit'],
+  ['8d'],
   ['sped', 'up'],
 ];
 
@@ -92,7 +100,7 @@ export function searchTrackScore(query, track) {
   const titleCoverage = coverage(queryTokens, titleTokens);
   let score = Math.min(1, (combinedCoverage * 0.75) + (titleCoverage * 0.25));
 
-  // A cover/karaoke/instrumental/stage-performance/etc. can have a perfect title
+  // A cover/karaoke/instrumental/stage/fan-edit/etc. can have a perfect title
   // match while still being the wrong version. Prefer the standard/original result
   // unless the user explicitly asked for that variant.
   if (hasUnrequestedVariant(query, track)) score *= 0.4;
