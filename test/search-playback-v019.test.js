@@ -75,6 +75,12 @@ test('unrequested alternate versions score below the acceptance threshold', () =
   }
 });
 
+test('alternate-version uploader names are down-ranked unless requested', () => {
+  assert.ok(searchTrackScore('heavy serenade', track('Heavy Serenade', 'Shin Giwon Piano')) < 0.55);
+  assert.ok(searchTrackScore('heavy serenade', track('Heavy Serenade', 'ZZang KARAOKE')) < 0.55);
+  assert.ok(searchTrackScore('heavy serenade piano', track('Heavy Serenade', 'Shin Giwon Piano')) >= 0.55);
+});
+
 test('good title+artist split stays on YTM without an unnecessary fallback', async () => {
   const target = searchTarget({
     ytm: [track('Abracadabra', 'Lady Gaga')],
