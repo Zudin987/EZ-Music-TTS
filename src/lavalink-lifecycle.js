@@ -58,12 +58,12 @@ export function eventTrackMatches(eventTrack, candidate) {
 }
 
 export function resolveLifecycleEventTrack(eventTrack, currentTrack, lastTrack) {
-  // Shoukaku 4.3.0's TypeScript interface omitted TrackExceptionEvent.track even
-  // though Lavalink v4 sends it. Keep compatibility with an actually missing
-  // field. When Lavalink does supply the exact event track, only act on it if it
-  // is still queue.current. A late event from the previous song must never skip,
-  // circuit-break, or source-fallback the newer song.
-  if (!eventTrack) return currentTrack || lastTrack || null;
+  // Lavalink v4 includes the exact track on TrackExceptionEvent and
+  // TrackStuckEvent. Shoukaku 4.3.0's TypeScript interface omitted the
+  // exception track field, but its runtime forwards the raw Lavalink payload.
+  // Never guess when identity is missing: a malformed or late trackless event
+  // must not be allowed to skip, circuit-break, or source-fallback a newer song.
+  if (!eventTrack) return null;
   if (eventTrackMatches(eventTrack, currentTrack)) return currentTrack;
   if (!currentTrack && eventTrackMatches(eventTrack, lastTrack)) return lastTrack;
   return null;
