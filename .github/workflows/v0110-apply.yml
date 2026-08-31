@@ -23,7 +23,9 @@ jobs:
           node-version: 22.14.0
           package-manager-cache: false
       - name: Apply focused patch
-        run: node scripts/apply-v0110.mjs
+        run: |
+          node scripts/apply-v0110.mjs
+          node scripts/refine-v0110-tests.mjs
       - name: Refresh lockfile
         run: npm install --package-lock-only --ignore-scripts
       - name: Locked clean install
@@ -46,6 +48,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md package.json package-lock.json lavalink/application.yml \
             src/music.js src/source-routing.js src/search-quality.js src/playback-fallback.js \
-            test/performance-v016.test.js test/search-playback-v0110.test.js
+            test/performance-v016.test.js test/search-playback-v0110.test.js test/source-routing.test.js
           git commit -m "fix: recover failed YouTube playback and ambiguous searches"
           git push origin HEAD:fix/v0110-search-playback-fallback
