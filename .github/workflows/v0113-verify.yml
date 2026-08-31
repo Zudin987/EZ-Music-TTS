@@ -6,7 +6,7 @@ on:
       - fix/v0113-fallback-race
     paths:
       - .github/workflows/v0113-verify.yml
-      - scripts/refine-v0113.py
+      - scripts/post-v0113-audit.py
 
 permissions:
   contents: write
@@ -23,10 +23,8 @@ jobs:
         with:
           node-version: 22.14.0
           package-manager-cache: false
-      - name: Apply focused product patch
-        run: |
-          python3 scripts/apply-v0113-fallback.py
-          python3 scripts/refine-v0113.py
+      - name: Apply final audit refinements
+        run: python3 scripts/post-v0113-audit.py
       - name: Locked clean install
         run: npm ci
       - name: Syntax checks
@@ -46,11 +44,11 @@ jobs:
           grep -q '      - ANDROID_VR' lavalink/application.yml
           grep -q '      - WEB' lavalink/application.yml
           grep -q '      - WEBEMBEDDED' lavalink/application.yml
-      - name: Commit verified product changes
+      - name: Commit verified audit refinements
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md package.json package-lock.json src/music.js src/commands.js src/playback-fallback.js src/playback-history.js test/*.test.js
-          git commit -m "fix: hold queue during alternate-source fallback"
+          git add src/music.js test/playback-fallback-v0113.test.js
+          git commit -m "fix: refine alternate-source fallback state"
           git push origin HEAD:fix/v0113-fallback-race
