@@ -19,145 +19,88 @@ jobs:
         with:
           node-version: '22.14.0'
           package-manager-cache: false
-      - name: Apply reliability audit patches
+      - name: Apply awaited transport controls
         shell: python
         run: |
           from pathlib import Path
 
-          def replace_once(text, old, new, label):
-              if new in text:
-                  return text
-              if old not in text:
-                  raise SystemExit(f'{label} anchor not found')
+          def replace_required(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 anchor, found {count}')
               return text.replace(old, new, 1)
 
           music_path = Path('src/music.js')
           music = music_path.read_text(encoding='utf-8')
-
-          import_needle = "import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';\n"
-          import_repl = import_needle + "import { activeTrackMatchesCurrent } from './playback-start.js';\n"
-          if "import { activeTrackMatchesCurrent } from './playback-start.js';" not in music:
-              music = replace_once(music, import_needle, import_repl, 'active-track import')
-
-          control_import_anchor = "import { activeTrackMatchesCurrent } from './playback-start.js';\n"
-          control_import = control_import_anchor + "import { setPlayerPaused, stopPlayerTrack } from './player-control.js';\n"
-          if "from './player-control.js'" not in music:
-              music = replace_once(music, control_import_anchor, control_import, 'player-control import')
-
-          handler_needle = "  async function handlePlayerStart(player, track) {\n    clearDisconnect(player.guildId);\n"
-          handler_repl = "  async function handlePlayerStart(player, track) {\n    // Kazagumo emits queue.current for playerStart instead of the TrackStartEvent\n    // payload. A late start from a replaced track can therefore be mislabeled as\n    // the newer queue.current. Shoukaku keeps the actual encoded Lavalink track;\n    // reject any mismatch before it can pollute history/status/recovery state.\n    if (!activeTrackMatchesCurrent(player)) {\n      console.warn('[player-start]', player.guildId, 'stale/mismatched TrackStart ignored');\n      return;\n    }\n    clearDisconnect(player.guildId);\n"
-          if "stale/mismatched TrackStart ignored" not in music:
-              music = replace_once(music, handler_needle, handler_repl, 'handlePlayerStart')
-
-          music = replace_once(
+          music = replace_required(
               music,
-              "        if (session.paused) player.pause(true);",
-              "        if (session.paused) await setPlayerPaused(player, true);",
-              'recovery pause',
+              "import { activeTrackMatchesCurrent } from './playback-start.js';\n",
+              "import { activeTrackMatchesCurrent } from './playback-start.js';\nimport { setPlayerPaused, stopPlayerTrack } from './player-control.js';\n",
+              'music import',
           )
-
-          music = replace_once(
+          music = replace_required(music, "        if (session.paused) player.pause(true);", "        if (session.paused) await setPlayerPaused(player, true);", 'recovery pause')
+          music = replace_required(music, "  function evaluateVoiceOccupancy(player) {", "  async function evaluateVoiceOccupancy(player) {", 'occupancy async')
+          music = replace_required(
               music,
-              "      if (transition === 'resume' && wasAutoPaused) {\n        try {\n          player.pause(false);\n          scheduleRecoverySave(player, 0);\n          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);\n        } catch (error) {\n          console.warn('[voice] auto-resume failed', error?.message || error);\n        }\n      }",
-              "      if (transition === 'resume' && wasAutoPaused) {\n        try {\n          await setPlayerPaused(player, false);\n          scheduleRecoverySave(player, 0);\n          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);\n          if (!hasHumanListener(player)) await evaluateVoiceOccupancy(player);\n        } catch (error) {\n          emptyVoiceAutoPaused.add(guildId);\n          console.warn('[voice] auto-resume failed', error?.message || error);\n        }\n      }",
+              "      const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);\n      if (transition === 'resume' && wasAutoPaused) {\n        try {\n          player.pause(false);\n          scheduleRecoverySave(player, 0);\n          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);\n        } catch (error) {\n          console.warn('[voice] auto-resume failed', error?.message || error);\n        }\n      }",
+              "      const wasAutoPaused = emptyVoiceAutoPaused.delete(guildId);\n      if (transition === 'resume' && wasAutoPaused) {\n        try {\n          await setPlayerPaused(player, false);\n          scheduleRecoverySave(player, 0);\n          console.log(`[voice] human listener returned; auto-resumed ${guildId}`);\n          if (!hasHumanListener(player)) await evaluateVoiceOccupancy(player);\n        } catch (error) {\n          emptyVoiceAutoPaused.add(guildId);\n          console.warn('[voice] auto-resume failed', error?.message || error);\n        }\n      }",
               'auto resume',
           )
-
-          music = replace_once(
+          music = replace_required(
               music,
               "    if (transition === 'pause') {\n      try {\n        player.pause(true);\n        emptyVoiceAutoPaused.add(guildId);\n        scheduleRecoverySave(player, 0);\n        console.log(`[voice] channel empty; auto-paused ${guildId}`);\n      } catch (error) {\n        console.warn('[voice] auto-pause failed', error?.message || error);\n      }\n    }",
-              "    if (transition === 'pause') {\n      try {\n        await setPlayerPaused(player, true);\n        // A human can return while the local REST pause is in flight. Never leave\n        // that listener stuck behind an auto-pause just because no second voice\n        // event arrives after the request completes.\n        if (hasHumanListener(player)) {\n          await setPlayerPaused(player, false);\n          emptyVoiceAutoPaused.delete(guildId);\n          scheduleRecoverySave(player, 0);\n          return;\n        }\n        emptyVoiceAutoPaused.add(guildId);\n        scheduleRecoverySave(player, 0);\n        console.log(`[voice] channel empty; auto-paused ${guildId}`);\n      } catch (error) {\n        emptyVoiceAutoPaused.delete(guildId);\n        console.warn('[voice] auto-pause failed', error?.message || error);\n      }\n    }",
+              "    if (transition === 'pause') {\n      try {\n        await setPlayerPaused(player, true);\n        if (hasHumanListener(player)) {\n          await setPlayerPaused(player, false);\n          emptyVoiceAutoPaused.delete(guildId);\n          scheduleRecoverySave(player, 0);\n          return;\n        }\n        emptyVoiceAutoPaused.add(guildId);\n        scheduleRecoverySave(player, 0);\n        console.log(`[voice] channel empty; auto-paused ${guildId}`);\n      } catch (error) {\n        emptyVoiceAutoPaused.delete(guildId);\n        console.warn('[voice] auto-pause failed', error?.message || error);\n      }\n    }",
               'auto pause',
           )
-
-          music = replace_once(
-              music,
-              "  function evaluateVoiceOccupancy(player) {",
-              "  async function evaluateVoiceOccupancy(player) {",
-              'async voice occupancy',
-          )
-          music = replace_once(
-              music,
-              "      evaluateVoiceOccupancy(player);\n      return;",
-              "      await evaluateVoiceOccupancy(player);\n      return;",
-              'voice timer reevaluate',
-          )
-          music = replace_once(
-              music,
-              "    evaluateVoiceOccupancy(player);\n  });",
-              "    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });",
-              'voiceStateUpdate async handling',
-          )
-          music = replace_once(
-              music,
-              "    evaluateVoiceOccupancy(player);\n  }\n\n  async function handlePlayerEmpty",
-              "    await evaluateVoiceOccupancy(player);\n  }\n\n  async function handlePlayerEmpty",
-              'playerStart occupancy await',
-          )
-
-          music = replace_once(
+          music = replace_required(music, "        evaluateVoiceOccupancy(player);\n        return;", "        await evaluateVoiceOccupancy(player);\n        return;", 'timer reevaluate')
+          music = replace_required(music, "    evaluateVoiceOccupancy(player);\n  });\n\n  function lavalinkBaseUrl", "    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });\n\n  function lavalinkBaseUrl", 'voice-state callback')
+          music = replace_required(music, "    evaluateVoiceOccupancy(player);\n  }\n\n  async function handlePlayerEmpty", "    await evaluateVoiceOccupancy(player);\n  }\n\n  async function handlePlayerEmpty", 'player start occupancy')
+          music = replace_required(
               music,
               "      try { if (player.queue.current) player.skip(); } catch { /* end event may already be in flight */ }",
               "      if (player.queue.current) void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));",
-              'source circuit stop',
+              'circuit stop',
           )
-          music = replace_once(
+          music = replace_required(
               music,
-              "          player.skip();",
-              "          void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));",
-              'source failure stop',
+              "          player.skip();\n        }\n      } catch (error) { console.warn('[source-protection] skip failed', error?.message || error); }",
+              "          void stopPlayerTrack(player).catch((error) => console.warn('[source-protection] stop failed', error?.message || error));\n        }\n      } catch (error) { console.warn('[source-protection] stop scheduling failed', error?.message || error); }",
+              'failure stop',
           )
-          music = replace_once(
+          music = replace_required(
               music,
-              "      player.skip();\n    } else if (player.queue.current && !player.playing",
-              "      await stopPlayerTrack(player);\n    } else if (player.queue.current && !player.playing",
+              "      player.skip();\n    } else if (player.queue.current && !player.playing && !player.paused && !player.shoukaku?.paused) {",
+              "      await stopPlayerTrack(player);\n    } else if (player.queue.current && !player.playing && !player.paused && !player.shoukaku?.paused) {",
               'fallback cancel stop',
           )
           music_path.write_text(music, encoding='utf-8')
 
           commands_path = Path('src/commands.js')
           commands = commands_path.read_text(encoding='utf-8')
-          command_import_anchor = "import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';\n"
-          command_import = command_import_anchor + "import { setPlayerPaused, stopPlayerTrack } from './player-control.js';\n"
-          if "from './player-control.js'" not in commands:
-              commands = replace_once(commands, command_import_anchor, command_import, 'commands player-control import')
-
-          commands = replace_once(
+          commands = replace_required(
+              commands,
+              "import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';\n",
+              "import { activeTrackMatchesCurrent, ensureQueuedPlayback } from './playback-start.js';\nimport { setPlayerPaused, stopPlayerTrack } from './player-control.js';\n",
+              'commands import',
+          )
+          commands = replace_required(
               commands,
               "    player.queue.current = null;\n    player.skip();",
               "    await stopPlayerTrack(player);\n    player.queue.current = null;\n    player.playing = false;",
-              'stop reset transport',
+              'stop reset',
           )
-          commands = replace_once(
+          commands = replace_required(
               commands,
               "function skipCurrent(player) {\n  requireCurrentTrack(player);\n  if (player.loop === 'track') player.setLoop('none');\n  player.skip();\n}",
               "async function skipCurrent(player) {\n  requireCurrentTrack(player);\n  if (player.loop === 'track') player.setLoop('none');\n  await stopPlayerTrack(player);\n}",
-              'manual skip helper',
+              'skip helper',
           )
-          commands = replace_once(
-              commands,
-              "if (name === 'pause') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); player.pause(true); checkpointRecovery(player); return privateReply(interaction, 'Paused.'); });",
-              "if (name === 'pause') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); await setPlayerPaused(player, true); checkpointRecovery(player); return privateReply(interaction, 'Paused.'); });",
-              'slash pause',
-          )
-          commands = replace_once(
-              commands,
-              "if (name === 'resume') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); player.pause(false); checkpointRecovery(player); return privateReply(interaction, 'Resumed.'); });",
-              "if (name === 'resume') return withGuildOperation(interaction.guildId, async () => { requireCurrentTrack(player); await setPlayerPaused(player, false); checkpointRecovery(player); return privateReply(interaction, 'Resumed.'); });",
-              'slash resume',
-          )
-          commands = replace_once(
-              commands,
-              "if (name === 'skip') return withGuildOperation(interaction.guildId, async () => { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); checkpointRecovery(player); return privateReply(interaction, 'Skipped.'); });",
-              "if (name === 'skip') return withGuildOperation(interaction.guildId, async () => { if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); checkpointRecovery(player); return privateReply(interaction, 'Skipped.'); });",
-              'slash skip',
-          )
-          commands = replace_once(
-              commands,
-              "if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }\n    else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }\n    else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); settle = true; }",
-              "if (action === 'pause') { requireCurrentTrack(player); await setPlayerPaused(player, true); }\n    else if (action === 'resume') { requireCurrentTrack(player); await setPlayerPaused(player, false); }\n    else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); settle = true; }",
-              'panel controls',
-          )
+          commands = replace_required(commands, "requireCurrentTrack(player); player.pause(true); checkpointRecovery(player);", "requireCurrentTrack(player); await setPlayerPaused(player, true); checkpointRecovery(player);", 'slash pause')
+          commands = replace_required(commands, "requireCurrentTrack(player); player.pause(false); checkpointRecovery(player);", "requireCurrentTrack(player); await setPlayerPaused(player, false); checkpointRecovery(player);", 'slash resume')
+          commands = replace_required(commands, "if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); checkpointRecovery(player);", "if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); checkpointRecovery(player);", 'slash skip')
+          commands = replace_required(commands, "if (action === 'pause') { requireCurrentTrack(player); player.pause(true); }", "if (action === 'pause') { requireCurrentTrack(player); await setPlayerPaused(player, true); }", 'panel pause')
+          commands = replace_required(commands, "else if (action === 'resume') { requireCurrentTrack(player); player.pause(false); }", "else if (action === 'resume') { requireCurrentTrack(player); await setPlayerPaused(player, false); }", 'panel resume')
+          commands = replace_required(commands, "else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) skipCurrent(player); settle = true; }", "else if (action === 'skip') { if (!(await cancelPlaybackFallbackForSkip(player))) await skipCurrent(player); settle = true; }", 'panel skip')
           commands_path.write_text(commands, encoding='utf-8')
       - run: npm ci
       - run: npm run check
@@ -169,9 +112,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/music.js src/commands.js
-          if git diff --cached --quiet; then
-            echo 'Patches already applied.'
-            exit 0
-          fi
           git commit -m 'fix: await pause and skip transport operations'
           git push origin HEAD:audit/v0.1.15-deep-reliability
