@@ -21,7 +21,24 @@ test('broadcast/stage versions are rejected for a plain song query', () => {
   }
 });
 
-test('stage/performance remains valid when explicitly requested', () => {
+test('fan-edited versions are rejected for a plain song query', () => {
+  const variants = [
+    "NMIXX ‘Heavy Serenade’ but the hidden vocals are louder",
+    'NMIXX Heavy Serenade Vocals Louder',
+    'NMIXX Heavy Serenade Bass Boosted',
+    'NMIXX Heavy Serenade 8D',
+    'NMIXX Heavy Serenade Line Distribution',
+    'NMIXX Heavy Serenade Fanmade',
+    'NMIXX Heavy Serenade Fan Made',
+    'NMIXX Heavy Serenade Edit',
+  ];
+  for (const title of variants) {
+    assert.ok(searchTrackScore('Heavy Serenade', track(title)) < SEARCH_MATCH_THRESHOLD, title);
+  }
+});
+
+test('stage/performance/edit remains valid when explicitly requested', () => {
   assert.ok(searchTrackScore('Heavy Serenade performance', track('NMIXX Heavy Serenade Performance')) >= SEARCH_MATCH_THRESHOLD);
   assert.ok(searchTrackScore('Heavy Serenade stage', track('NMIXX Heavy Serenade Stage')) >= SEARCH_MATCH_THRESHOLD);
+  assert.ok(searchTrackScore('Heavy Serenade edit', track('NMIXX Heavy Serenade Edit')) >= SEARCH_MATCH_THRESHOLD);
 });
