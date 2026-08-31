@@ -1,4 +1,4 @@
-name: Temporary v0.1.15 voice transition patch
+name: Temporary v0.1.15 performance and reliability patch
 
 on:
   push:
@@ -19,10 +19,11 @@ jobs:
         with:
           node-version: '22.14.0'
           package-manager-cache: false
-      - name: Apply Discord voice transition hardening
+      - name: Apply low-risk performance and shutdown hardening
         shell: python
         run: |
           from pathlib import Path
+          import json
 
           def replace_required(text, old, new, label):
               count = text.count(old)
@@ -30,19 +31,84 @@ jobs:
                   raise SystemExit(f'{label}: expected 1 anchor, found {count}')
               return text.replace(old, new, 1)
 
-          path = Path('src/music.js')
-          text = path.read_text(encoding='utf-8')
-          text = replace_required(
-              text,
-              "import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';",
-              "import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceChannelTransition, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';",
-              'lifecycle import',
+          storage_path = Path('src/storage.js')
+          storage = storage_path.read_text(encoding='utf-8')
+          storage = replace_required(
+              storage,
+              "db.pragma('journal_mode = WAL');\ndb.pragma('foreign_keys = ON');",
+              "db.pragma('journal_mode = WAL');\n// WAL + NORMAL keeps metadata writes fast while preserving database integrity.\n// A sudden power loss may lose the newest transaction, which is acceptable for\n// disposable history/recovery metadata and avoids FULL-mode fsync overhead.\ndb.pragma('synchronous = NORMAL');\ndb.pragma('foreign_keys = ON');",
+              'sqlite synchronous mode',
           )
-          old = "  client.on('voiceStateUpdate', (oldState, newState) => {\n    const guildId = newState.guild?.id || oldState.guild?.id;\n    const player = guildId ? music.players.get(guildId) : null;\n    if (!player) return;\n    const voiceId = player.voiceId || voiceIds.get(guildId);\n    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;\n    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });"
-          new = "  client.on('voiceStateUpdate', (oldState, newState) => {\n    const guildId = newState.guild?.id || oldState.guild?.id;\n    const player = guildId ? music.players.get(guildId) : null;\n    if (!player) return;\n\n    // Shoukaku consumes raw VOICE_STATE_UPDATE packets and follows external bot\n    // moves, but Kazagumo's wrapper voiceId is not updated by that path. Keep EZ's\n    // wrapper/cache synchronized with the state Discord already accepted instead\n    // of sending a second move request back to Discord.\n    if (oldState.id === client.user?.id) {\n      const botTransition = voiceChannelTransition(oldState.channelId, newState.channelId);\n      if (botTransition.kind === 'left') {\n        void retirePlayerForTransportLoss(player, 'Discord moved bot out of voice').catch((error) => {\n          console.warn('[voice] external disconnect cleanup failed', error?.message || error);\n        });\n        return;\n      }\n      if (botTransition.kind === 'moved' || botTransition.kind === 'joined') {\n        const previousVoiceId = botTransition.from;\n        player.voiceId = botTransition.to;\n        voiceIds.set(guildId, botTransition.to);\n        clearVoiceCloseRecoveryTimer(guildId);\n        scheduleRecoverySave(player, 0);\n\n        if (previousVoiceId && previousVoiceId !== botTransition.to) {\n          void client.rest.put(`/channels/${previousVoiceId}/voice-status`, { body: { status: null } }).catch(() => {});\n        }\n        if (player.queue.current) void setVoiceStatus(player, player.queue.current);\n        void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n        return;\n      }\n    }\n\n    const voiceId = player.voiceId || voiceIds.get(guildId);\n    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;\n    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });"
-          text = replace_required(text, old, new, 'voice state handler')
-          path.write_text(text, encoding='utf-8')
-      - run: npm ci
+          storage_path.write_text(storage, encoding='utf-8')
+
+          lavalink_path = Path('lavalink/application.yml')
+          lavalink = lavalink_path.read_text(encoding='utf-8')
+          lavalink = replace_required(
+              lavalink,
+              "    youtubePlaylistLoadLimit: 3\n    # Diagnostic only:",
+              "    youtubePlaylistLoadLimit: 3\n    # SoundCloud is the emergency audio fallback. Preview-only entries cannot\n    # satisfy a full-song retry, so filter them before they can enter selection.\n    soundcloudFilterOutPreviewTracks: true\n    # Diagnostic only:",
+              'soundcloud preview filter',
+          )
+          lavalink_path.write_text(lavalink, encoding='utf-8')
+
+          stop_path = Path('stop-bot.bat')
+          stop = stop_path.read_text(encoding='utf-8')
+          stop = replace_required(
+              stop,
+              "for($i=0;$i -lt 20;$i++){Start-Sleep -Milliseconds 250;",
+              "for($i=0;$i -lt 100;$i++){Start-Sleep -Milliseconds 250;",
+              'graceful stop window',
+          )
+          stop_path.write_text(stop, encoding='utf-8')
+
+          package_path = Path('package.json')
+          package = json.loads(package_path.read_text(encoding='utf-8'))
+          check = package['scripts']['check']
+          if 'src/config.js' not in check:
+              check = check.replace('node --check src/index.js', 'node --check src/index.js && node --check src/config.js')
+          if 'src/player-control.js' not in check:
+              check = check.replace('node --check src/playback-start.js', 'node --check src/playback-start.js && node --check src/player-control.js')
+          package['scripts']['check'] = check
+          package_path.write_text(json.dumps(package, indent=2) + '\n', encoding='utf-8')
+
+          test_path = Path('test/performance-reliability-v0115.test.js')
+          test_path.write_text("""import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+
+          test('SQLite metadata writes use WAL plus NORMAL synchronous mode', () => {
+            const source = fs.readFileSync('src/storage.js', 'utf8');
+            assert.match(source, /journal_mode = WAL/);
+            assert.match(source, /synchronous = NORMAL/);
+          });
+
+          test('syntax check covers configuration and awaited transport control modules', () => {
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            assert.match(pkg.scripts.check, /src\\/config\\.js/);
+            assert.match(pkg.scripts.check, /src\\/player-control\\.js/);
+          });
+
+          test('SoundCloud fallback excludes preview-only tracks', () => {
+            const config = fs.readFileSync('lavalink/application.yml', 'utf8');
+            assert.match(config, /soundcloudFilterOutPreviewTracks:\\s*true/);
+          });
+
+          test('Windows graceful shutdown can outlast the 20 second Lavalink REST timeout', () => {
+            const stop = fs.readFileSync('stop-bot.bat', 'utf8');
+            const music = fs.readFileSync('src/music.js', 'utf8');
+            assert.match(stop, /for\\(\\$i=0;\\$i -lt 100;\\$i\\+\\+\\)\\{Start-Sleep -Milliseconds 250;/);
+            assert.match(music, /restTimeout:\\s*20_000/);
+          });
+          """.replace(/^          /gm, ''), encoding='utf-8')
+      - name: Upgrade SQLite binding to current N-API release
+        run: npm install --save-exact better-sqlite3@13.0.3
+      - name: Verify clean locked install
+        shell: bash
+        run: |
+          rm -rf node_modules
+          npm ci
+      - name: Smoke-test SQLite storage
+        run: node -e "import('./src/storage.js').then(({ closeStorage }) => closeStorage())"
       - run: npm run check
       - run: npm test
       - name: Commit product patch
@@ -51,6 +117,6 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/music.js
-          git commit -m 'fix: synchronize externally moved Discord voice state'
+          git add package.json package-lock.json src/storage.js lavalink/application.yml stop-bot.bat test/performance-reliability-v0115.test.js
+          git commit -m 'perf: harden storage fallback and graceful shutdown'
           git push origin HEAD:audit/v0.1.15-deep-reliability
