@@ -69,6 +69,14 @@ function matchesCorroboratedIdentity(track, query, identityTokens) {
   return false;
 }
 
+function durationCompatible(canonical, candidate) {
+  const base = Number(canonical?.length || 0);
+  const next = Number(candidate?.length || 0);
+  if (!base || !next) return true;
+  const tolerance = Math.max(45_000, base * 0.30);
+  return Math.abs(next - base) <= tolerance;
+}
+
 export function searchChoiceKind(track, origin = '') {
   const title = String(track?.title || '');
   if (/\blyrics?\b|lyric\s+video/i.test(title)) return 'Lyrics';
@@ -122,9 +130,11 @@ function collectCandidates(query, sourceTracks, canonical, identityTokens) {
   const seen = new Set();
   for (const source of sourceTracks) {
     for (const track of source.tracks.slice(0, PER_SOURCE_SCAN)) {
+      if (!track || track?.isStream) continue;
       const score = preferenceScore(query, track, source.origin, { canonical: sameExactTrack(track, canonical) });
       if (score < SEARCH_MATCH_THRESHOLD) continue;
       if (!matchesCorroboratedIdentity(track, query, identityTokens)) continue;
+      if (!durationCompatible(canonical, track)) continue;
       const key = exactMediaKey(track);
       if (seen.has(key)) continue;
       seen.add(key);
