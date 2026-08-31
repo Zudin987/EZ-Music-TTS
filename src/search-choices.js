@@ -3,6 +3,10 @@ import { isAmbiguousTitleOnlyMatch, rankSearchResult, searchTrackScore, SEARCH_M
 
 const DEFAULT_CHOICE_LIMIT = 3;
 const PER_SOURCE_SCAN = 8;
+const IDENTITY_NOISE = new Set([
+  'official', 'video', 'audio', 'lyrics', 'lyric', 'visualizer', 'mv', 'music',
+  'topic', 'vevo', 'entertainment', 'records', 'record', 'channel', 'provided', 'youtube',
+]);
 
 function exactMediaKey(track) {
   const identifier = String(track?.identifier || '').trim();
@@ -12,11 +16,57 @@ function exactMediaKey(track) {
   return `meta:${String(track?.author || '').toLowerCase()}\u0000${String(track?.title || '').toLowerCase()}`;
 }
 
-function rawQueryTokens(value) {
-  return new Set(String(value || '')
+function textTokens(value) {
+  return String(value || '')
+    .normalize('NFKD')
     .toLowerCase()
+    .replace(/\p{M}/gu, '')
     .replace(/&/g, ' and ')
-    .match(/[\p{L}\p{N}]+/gu) || []);
+    .match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+function rawQueryTokens(value) {
+  return new Set(textTokens(value));
+}
+
+function trackIdentityTokens(track, queryTokens) {
+  const found = new Set();
+  for (const token of [...textTokens(track?.title), ...textTokens(track?.author)]) {
+    if (queryTokens.has(token) || IDENTITY_NOISE.has(token)) continue;
+    found.add(token);
+  }
+  return found;
+}
+
+function corroboratedIdentityTokens(query, sourceTracks) {
+  const queryTokens = rawQueryTokens(query);
+  const originsByToken = new Map();
+
+  for (const source of sourceTracks) {
+    const sourceTokens = new Set();
+    for (const track of source.tracks.slice(0, 4)) {
+      if (searchTrackScore(query, track) < SEARCH_MATCH_THRESHOLD) continue;
+      for (const token of trackIdentityTokens(track, queryTokens)) sourceTokens.add(token);
+    }
+    for (const token of sourceTokens) {
+      const origins = originsByToken.get(token) || new Set();
+      origins.add(source.origin);
+      originsByToken.set(token, origins);
+    }
+  }
+
+  // Only trust artist/entity clues independently seen in at least two search
+  // routes. This keeps title-only searches from inheriting a single bad uploader.
+  return new Set([...originsByToken.entries()]
+    .filter(([, origins]) => origins.size >= 2)
+    .map(([token]) => token));
+}
+
+function matchesCorroboratedIdentity(track, query, identityTokens) {
+  if (!identityTokens.size) return true;
+  const candidate = trackIdentityTokens(track, rawQueryTokens(query));
+  for (const token of identityTokens) if (candidate.has(token)) return true;
+  return false;
 }
 
 export function searchChoiceKind(track, origin = '') {
@@ -67,13 +117,14 @@ function sameExactTrack(a, b) {
   return Boolean(a && b && exactMediaKey(a) === exactMediaKey(b));
 }
 
-function collectCandidates(query, sourceTracks, canonical) {
+function collectCandidates(query, sourceTracks, canonical, identityTokens) {
   const candidates = [];
   const seen = new Set();
   for (const source of sourceTracks) {
     for (const track of source.tracks.slice(0, PER_SOURCE_SCAN)) {
       const score = preferenceScore(query, track, source.origin, { canonical: sameExactTrack(track, canonical) });
       if (score < SEARCH_MATCH_THRESHOLD) continue;
+      if (!matchesCorroboratedIdentity(track, query, identityTokens)) continue;
       const key = exactMediaKey(track);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -141,12 +192,14 @@ export async function resolveSearchChoices(target, query, requester, { limit = D
   const rankedLyrics = rankedTracks(lyricsResult, clean);
   const rankedYtm = rankedTracks(ytmResult, clean);
   const rankedYoutube = rankedTracks(youtubeResult, clean);
-  const canonical = canonicalTrack(clean, rankedYtm, rankedYoutube);
-  const candidates = collectCandidates(clean, [
+  const sourceTracks = [
     { origin: 'lyrics', tracks: rankedLyrics },
     { origin: 'ytm', tracks: rankedYtm },
     { origin: 'youtube', tracks: rankedYoutube },
-  ], canonical);
+  ];
+  const canonical = canonicalTrack(clean, rankedYtm, rankedYoutube);
+  const identityTokens = corroboratedIdentityTokens(clean, sourceTracks);
+  const candidates = collectCandidates(clean, sourceTracks, canonical, identityTokens);
 
   return pickDiverse(candidates, safeLimit);
 }
