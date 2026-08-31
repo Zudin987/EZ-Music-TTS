@@ -1,13 +1,13 @@
 const NODE_RECONNECT_DELAYS_MS = [2_000, 5_000, 10_000, 15_000, 30_000];
 
-const VOICE_CLOSE_IMMEDIATE_RETIRE = new Set([
-  4006, // session no longer valid
-  4009, // session timed out
-  4014, // disconnected; Discord says do not reconnect
-  4017, // DAVE required
-  4021, // rate limited; do not reconnect
-  4022, // call terminated; do not reconnect
-]);
+// Koe already retries session-timeout/server-crash/transient voice closes.
+// These codes instead require a fresh Discord gateway voice handshake because
+// the old voice websocket/session must not simply be resumed.
+const VOICE_CLOSE_REFRESH_SESSION = new Set([4006, 4014, 4022]);
+
+// A DAVE-required close on a DAVE-capable Lavalink stack indicates a persistent
+// capability mismatch; a rate-limit close must not be hammered with rejoins.
+const VOICE_CLOSE_IMMEDIATE_RETIRE = new Set([4017, 4021]);
 
 export const VOICE_CLOSE_RECOVERY_GRACE_MS = 5_000;
 
@@ -17,9 +17,30 @@ export function nodeReconnectDelayMs(attempt) {
 }
 
 export function voiceCloseDisposition(code) {
-  const value = Number(code || 0);
-  if (VOICE_CLOSE_IMMEDIATE_RETIRE.has(value)) return 'retire';
+  const numeric = Number(code || 0);
+  if (VOICE_CLOSE_IMMEDIATE_RETIRE.has(numeric)) return 'retire';
+  if (VOICE_CLOSE_REFRESH_SESSION.has(numeric)) return 'refresh';
   return 'watch';
+}
+
+export function botVoiceChannelTransition(botUserId, oldState, newState) {
+  const botId = String(botUserId || '');
+  const oldId = String(oldState?.id || '');
+  const newId = String(newState?.id || '');
+  if (!botId || (oldId !== botId && newId !== botId)) return null;
+
+  const oldChannelId = oldState?.channelId || null;
+  const channelId = newState?.channelId || null;
+  if (oldChannelId === channelId) return null;
+  if (channelId) {
+    return {
+      type: oldChannelId ? 'moved' : 'joined',
+      oldChannelId,
+      channelId,
+    };
+  }
+  if (oldChannelId) return { type: 'left', oldChannelId, channelId: null };
+  return null;
 }
 
 function eventEncoded(track) {

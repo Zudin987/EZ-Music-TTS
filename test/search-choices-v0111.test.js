@@ -111,7 +111,7 @@ test('three-choice typed search keeps the v0.1.14 low-memory playback profile', 
   const start = fs.readFileSync(new URL('../start-bot.bat', import.meta.url), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
-  assert.equal(pkg.version, '0.1.14');
+  assert.equal(pkg.version, '0.1.15');
   assert.match(pkg.scripts.check, /src\/search-choices\.js/);
   assert.match(commands, /shouldOfferSearchChoices\(query\)/);
   assert.match(commands, /resolveSearchChoices\(music, query, interaction\.user, \{ limit: 3 \}\)/);

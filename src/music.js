@@ -17,7 +17,7 @@ import { resolvePreferredSearch } from './source-routing.js';
 import { emptyVoiceTransition } from './performance.js';
 import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQueries, playbackFallbackQuery, restoreFallbackQueue, takeFallbackQueueHold, youtubeTrackId } from './playback-fallback.js';
 import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';
-import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
+import { botVoiceChannelTransition, nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
 
 const MAX_UPCOMING_QUEUE = 300;
 const SOURCE_FAILURE_WINDOW_MS = 60_000;
@@ -99,6 +99,48 @@ export function createMusic(client, config, gemini) {
     const timer = voiceCloseRecoveryTimers.get(guildId);
     if (timer) clearTimeout(timer);
     voiceCloseRecoveryTimers.delete(guildId);
+  }
+
+  function currentBotVoiceChannelId(guildId) {
+    const guild = client.guilds.cache.get(guildId);
+    const botId = client.user?.id;
+    if (!guild || !botId) return null;
+    return guild.voiceStates?.cache?.get(botId)?.channelId || guild.members?.me?.voice?.channelId || null;
+  }
+
+  function syncPlayerVoiceChannel(player, channelId) {
+    if (!player || !channelId || music.players.get(player.guildId) !== player) return false;
+    const previous = player.voiceId || voiceIds.get(player.guildId) || null;
+    player.voiceId = channelId;
+    voiceIds.set(player.guildId, channelId);
+    if (previous === channelId) return false;
+
+    console.log(`[voice] synchronized ${player.guildId} channel ${previous || 'none'} -> ${channelId}`);
+    scheduleRecoverySave(player, 0);
+
+    // Voice channel status belongs to the channel, so do not leave a stale
+    // Playing: label behind when an administrator moves the bot.
+    if (previous) {
+      void client.rest.put(`/channels/${previous}/voice-status`, { body: { status: null } }).catch(() => {});
+    }
+    if (player.queue.current) void setVoiceStatus(player, player.queue.current);
+    return true;
+  }
+
+  function scheduleVoiceTransportWatchdog(player, reason) {
+    if (!player || music.players.get(player.guildId) !== player) return false;
+    const guildId = player.guildId;
+    clearVoiceCloseRecoveryTimer(guildId);
+    const timer = setTimeout(() => {
+      voiceCloseRecoveryTimers.delete(guildId);
+      if (music.players.get(guildId) !== player || !player.voiceId) return;
+      const actualChannelId = currentBotVoiceChannelId(guildId);
+      if (actualChannelId) syncPlayerVoiceChannel(player, actualChannelId);
+      void retirePlayerForTransportLoss(player, reason);
+    }, VOICE_CLOSE_RECOVERY_GRACE_MS);
+    timer.unref?.();
+    voiceCloseRecoveryTimers.set(guildId, timer);
+    return true;
   }
 
   function clearLocalNodeReconnectTimer() {
@@ -989,6 +1031,24 @@ export function createMusic(client, config, gemini) {
     const guildId = newState.guild?.id || oldState.guild?.id;
     const player = guildId ? music.players.get(guildId) : null;
     if (!player) return;
+
+    const botTransition = botVoiceChannelTransition(client.user?.id, oldState, newState);
+    if (botTransition?.channelId) {
+      // Shoukaku receives the Discord gateway packet itself, but Kazagumo's
+      // public player.voiceId is not updated when an administrator moves the
+      // bot. Keep the wrapper/recovery/command checks synchronized with the
+      // gateway's actual channel without generating another move request.
+      syncPlayerVoiceChannel(player, botTransition.channelId);
+      evaluateVoiceOccupancy(player);
+      return;
+    }
+    if (botTransition?.type === 'left') {
+      clearPendingPlaybackHistory(guildId);
+      checkpointRecovery(player);
+      scheduleVoiceTransportWatchdog(player, 'Discord gateway reports the bot left voice and it did not recover');
+      return;
+    }
+
     const voiceId = player.voiceId || voiceIds.get(guildId);
     if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
     evaluateVoiceOccupancy(player);
@@ -1167,26 +1227,39 @@ export function createMusic(client, config, gemini) {
     if (!player || music.players.get(player.guildId) !== player || !player.voiceId) return;
     const code = Number(data?.code || 0);
     const reason = String(data?.reason || 'voice websocket closed');
-    console.warn(`[voice] Discord voice websocket closed for ${player.guildId}: ${code || 'unknown'} ${reason}`);
+    const disposition = voiceCloseDisposition(code);
+    const alreadyRecovering = voiceCloseRecoveryTimers.has(player.guildId);
+    const actualChannelId = currentBotVoiceChannelId(player.guildId);
+    if (actualChannelId) syncPlayerVoiceChannel(player, actualChannelId);
+
+    console.warn(`[voice] Discord voice websocket closed for ${player.guildId}: ${code || 'unknown'} ${reason} (${disposition})`);
     clearPendingPlaybackHistory(player.guildId);
     checkpointRecovery(player);
-    clearVoiceCloseRecoveryTimer(player.guildId);
 
-    if (voiceCloseDisposition(code) === 'retire') {
+    if (disposition === 'retire') {
+      clearVoiceCloseRecoveryTimer(player.guildId);
       await retirePlayerForTransportLoss(player, `Discord voice closed ${code}: ${reason}`);
       return;
     }
 
-    // Some transient voice closes recover inside Lavalink/Koe. Give that path a
-    // short chance and cancel this watchdog as soon as a connected playerUpdate
-    // arrives. If it never does, preserve recovery and retire the stale wrapper.
-    const timer = setTimeout(() => {
-      voiceCloseRecoveryTimers.delete(player.guildId);
-      if (music.players.get(player.guildId) !== player || !player.voiceId) return;
-      void retirePlayerForTransportLoss(player, `Discord voice did not recover after close ${code}: ${reason}`);
-    }, VOICE_CLOSE_RECOVERY_GRACE_MS);
-    timer.unref?.();
-    voiceCloseRecoveryTimers.set(player.guildId, timer);
+    // Koe already retries transient/time-out/server-crash closes itself. For
+    // 4006/4014/4022 the old voice session must not be resumed, so request one
+    // fresh main-gateway voice handshake if Discord still says the bot is in a
+    // channel. A kicked/deleted-channel bot has no actual channel and simply
+    // falls through to the same bounded watchdog.
+    if (disposition === 'refresh' && actualChannelId && !alreadyRecovering) {
+      try {
+        player.setVoiceChannel(actualChannelId);
+        console.warn(`[voice] requested a fresh Discord voice session for ${player.guildId} after close ${code}`);
+      } catch (error) {
+        console.warn('[voice] fresh-session request failed', error?.message || error);
+      }
+    }
+
+    scheduleVoiceTransportWatchdog(
+      player,
+      `Discord voice did not recover after close ${code}: ${reason}`,
+    );
   }
 
   async function handlePlayerStart(player, track) {

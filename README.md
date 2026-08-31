@@ -344,3 +344,12 @@ EZ Music now treats Lavalink-node state, Discord voice-WebSocket state, and trac
 Discord voice-WebSocket closes are also watched: close codes that Discord says should not reconnect retire the stale player immediately, while other closes get a short recovery grace window and are retired only if no connected player update arrives. Lavalink v4's event-provided Track object is used to reject late TrackException/TrackStuck events from a previous song, preventing a stale event from skipping or source-fallbacking the new current song.
 
 This hardening is event-driven and adds no polling service, audio filters, extra Lavalink node, buffer increase, or heap increase.
+
+
+## Voice move and fallback hardening (v0.1.15)
+
+EZ Music now treats the Discord gateway's bot voice state as the source of truth for channel moves. If an administrator moves the bot between voice channels, Kazagumo's cached `player.voiceId`, command same-channel checks, occupancy handling, voice-channel status, and SQLite recovery snapshot are synchronized to the new channel instead of staying pinned to the old one. A gateway-reported leave gets the same short transport-recovery watchdog used for voice websocket closures, so a kick cannot leave a cached ghost player.
+
+Voice close handling is also aligned more closely with the current Discord/Koe lifecycle: session-invalid/disconnected/call-terminated closes (`4006`, `4014`, `4022`) request one fresh Discord gateway voice handshake when the bot is still present in a channel; Koe-managed transient closes are allowed to recover; DAVE-required/rate-limit hard failures (`4017`, `4021`) retire safely rather than looping. SoundCloud preview-only subscription tracks are filtered at Lavalink so emergency source fallback prefers complete songs.
+
+This remains event-driven and keeps the existing raw-audio/low-memory profile unchanged: no DSP, OAuth, poToken service, extra Lavalink node, polling daemon, buffer increase, or heap increase.

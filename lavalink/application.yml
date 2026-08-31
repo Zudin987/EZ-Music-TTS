@@ -48,6 +48,10 @@ lavalink:
     # 3 pages x ~100 tracks keeps huge YouTube playlists from creating large
     # transient responses on a machine with a strict RAM budget.
     youtubePlaylistLoadLimit: 3
+    # SoundCloud is the emergency audio fallback when anonymous YouTube
+    # playback is blocked. Never surface subscription-only preview tracks as if
+    # they were a full-song fallback. This is filtering only, not audio DSP.
+    soundcloudFilterOutPreviewTracks: true
     # Diagnostic only: report unusually long JVM GC pauses so they can be
     # correlated with frame starvation without adding another monitor/service.
     gc-warnings: true

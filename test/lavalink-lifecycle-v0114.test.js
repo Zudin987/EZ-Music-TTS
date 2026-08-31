@@ -7,10 +7,10 @@ test('node reconnect backoff is bounded and becomes 30s', () => {
   assert.deepEqual([1, 2, 3, 4, 5, 8].map(nodeReconnectDelayMs), [2000, 5000, 10000, 15000, 30000, 30000]);
 });
 
-test('Discord close codes that must not reconnect retire immediately', () => {
-  for (const code of [4006, 4009, 4014, 4017, 4021, 4022]) assert.equal(voiceCloseDisposition(code), 'retire');
-  assert.equal(voiceCloseDisposition(4015), 'watch');
-  assert.equal(voiceCloseDisposition(1006), 'watch');
+test('Discord voice close policy distinguishes fresh-session, transient, and hard-stop cases', () => {
+  for (const code of [4006, 4014, 4022]) assert.equal(voiceCloseDisposition(code), 'refresh');
+  for (const code of [4009, 4015, 1006]) assert.equal(voiceCloseDisposition(code), 'watch');
+  for (const code of [4017, 4021]) assert.equal(voiceCloseDisposition(code), 'retire');
 });
 
 test('event identity prefers exact encoded Lavalink track', () => {
@@ -47,5 +47,5 @@ test('v0.1.14 source wires node, voice close, and stale-event protections', () =
   assert.match(music, /resolveLifecycleEventTrack\(data\?\.track/);
   assert.match(music, /getLavalinkNodeHealth/);
   assert.match(commands, /getLavalinkNodeHealth/);
-  assert.equal(pkg.version, '0.1.14');
+  assert.equal(pkg.version, '0.1.15');
 });
