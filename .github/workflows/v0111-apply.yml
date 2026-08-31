@@ -1,0 +1,47 @@
+name: Verify v0.1.11 three-choice search
+
+on:
+  push:
+    branches:
+      - feat/v0111-three-choice-search
+    paths:
+      - .github/workflows/v0111-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/v0111-three-choice-search
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          package-manager-cache: false
+      - name: Apply product patch
+        run: node scripts/apply-v0111-three-choice.mjs
+      - name: Locked clean install
+        run: npm ci
+      - name: Syntax checks
+        run: npm run check
+      - name: Full regression suite
+        run: npm test
+      - name: Preserve playback profile
+        run: |
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+      - name: Commit verified product changes
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md package.json package-lock.json src/commands.js src/ui.js src/search-picker.js src/search-choices.js test/search-choices-v0111.test.js
+          git commit -m "feat: make typed play searches three-choice"
+          git push origin HEAD:feat/v0111-three-choice-search
