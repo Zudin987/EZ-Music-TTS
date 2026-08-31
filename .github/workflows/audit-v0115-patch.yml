@@ -38,51 +38,8 @@ jobs:
               "import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceChannelTransition, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';",
               'lifecycle import',
           )
-          old = """  client.on('voiceStateUpdate', (oldState, newState) => {
-    const guildId = newState.guild?.id || oldState.guild?.id;
-    const player = guildId ? music.players.get(guildId) : null;
-    if (!player) return;
-    const voiceId = player.voiceId || voiceIds.get(guildId);
-    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
-    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
-  });"""
-          new = """  client.on('voiceStateUpdate', (oldState, newState) => {
-    const guildId = newState.guild?.id || oldState.guild?.id;
-    const player = guildId ? music.players.get(guildId) : null;
-    if (!player) return;
-
-    // Shoukaku consumes raw VOICE_STATE_UPDATE packets and follows external bot
-    // moves, but Kazagumo's wrapper voiceId is not updated by that path. Keep EZ's
-    // wrapper/cache synchronized with the state Discord already accepted instead
-    // of sending a second move request back to Discord.
-    if (oldState.id === client.user?.id) {
-      const botTransition = voiceChannelTransition(oldState.channelId, newState.channelId);
-      if (botTransition.kind === 'left') {
-        void retirePlayerForTransportLoss(player, 'Discord moved bot out of voice').catch((error) => {
-          console.warn('[voice] external disconnect cleanup failed', error?.message || error);
-        });
-        return;
-      }
-      if (botTransition.kind === 'moved' || botTransition.kind === 'joined') {
-        const previousVoiceId = botTransition.from;
-        player.voiceId = botTransition.to;
-        voiceIds.set(guildId, botTransition.to);
-        clearVoiceCloseRecoveryTimer(guildId);
-        scheduleRecoverySave(player, 0);
-
-        if (previousVoiceId && previousVoiceId !== botTransition.to) {
-          void client.rest.put(`/channels/${previousVoiceId}/voice-status`, { body: { status: null } }).catch(() => {});
-        }
-        if (player.queue.current) void setVoiceStatus(player, player.queue.current);
-        void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
-        return;
-      }
-    }
-
-    const voiceId = player.voiceId || voiceIds.get(guildId);
-    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;
-    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));
-  });"""
+          old = "  client.on('voiceStateUpdate', (oldState, newState) => {\n    const guildId = newState.guild?.id || oldState.guild?.id;\n    const player = guildId ? music.players.get(guildId) : null;\n    if (!player) return;\n    const voiceId = player.voiceId || voiceIds.get(guildId);\n    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;\n    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });"
+          new = "  client.on('voiceStateUpdate', (oldState, newState) => {\n    const guildId = newState.guild?.id || oldState.guild?.id;\n    const player = guildId ? music.players.get(guildId) : null;\n    if (!player) return;\n\n    // Shoukaku consumes raw VOICE_STATE_UPDATE packets and follows external bot\n    // moves, but Kazagumo's wrapper voiceId is not updated by that path. Keep EZ's\n    // wrapper/cache synchronized with the state Discord already accepted instead\n    // of sending a second move request back to Discord.\n    if (oldState.id === client.user?.id) {\n      const botTransition = voiceChannelTransition(oldState.channelId, newState.channelId);\n      if (botTransition.kind === 'left') {\n        void retirePlayerForTransportLoss(player, 'Discord moved bot out of voice').catch((error) => {\n          console.warn('[voice] external disconnect cleanup failed', error?.message || error);\n        });\n        return;\n      }\n      if (botTransition.kind === 'moved' || botTransition.kind === 'joined') {\n        const previousVoiceId = botTransition.from;\n        player.voiceId = botTransition.to;\n        voiceIds.set(guildId, botTransition.to);\n        clearVoiceCloseRecoveryTimer(guildId);\n        scheduleRecoverySave(player, 0);\n\n        if (previousVoiceId && previousVoiceId !== botTransition.to) {\n          void client.rest.put(`/channels/${previousVoiceId}/voice-status`, { body: { status: null } }).catch(() => {});\n        }\n        if (player.queue.current) void setVoiceStatus(player, player.queue.current);\n        void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n        return;\n      }\n    }\n\n    const voiceId = player.voiceId || voiceIds.get(guildId);\n    if (!voiceId || (oldState.channelId !== voiceId && newState.channelId !== voiceId)) return;\n    void evaluateVoiceOccupancy(player).catch((error) => console.warn('[voice] occupancy evaluation failed', error?.message || error));\n  });"
           text = replace_required(text, old, new, 'voice state handler')
           path.write_text(text, encoding='utf-8')
       - run: npm ci
