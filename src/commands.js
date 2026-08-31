@@ -25,6 +25,7 @@ import {
 import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 import { voiceTransportQuality } from './performance.js';
 import { createSearchPickerRegistry } from './search-picker.js';
+import { ensureQueuedPlayback } from './playback-start.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
 const PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications;
@@ -184,10 +185,16 @@ async function searchAndQueue(player, query, requester, next, guard, queueTracks
     guard();
     const value = queueTracks(player, tracks, { next, perRequestLimit });
     if (!value.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-    if (!player.playing && !player.paused) await player.play();
-    return value;
+    const startState = await ensureQueuedPlayback(player);
+    return { value, startState };
   });
-  return { tracks: queued.added, result, omitted: queued.omitted, sourceCount: tracks.length };
+  return {
+    tracks: queued.value.added,
+    result,
+    omitted: queued.value.omitted,
+    sourceCount: tracks.length,
+    started: Boolean(queued.startState?.started),
+  };
 }
 
 async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3, guard = () => {}, searchPreferred = null) {
@@ -397,7 +404,7 @@ const queuePayload = (player, guildId, page = 0, selectedIndex = null, notice = 
 const livePanels = createLivePanelRegistry({
   render: async (sourceInteraction, { retiring }) => {
     const currentPlayer = music.players.get(sourceInteraction.guildId);
-    if (!currentPlayer?.queue?.current) {
+    if (!currentPlayer?.queue?.current && !Number(currentPlayer?.queue?.length || 0)) {
       return {
         payload: panelPayload(
           currentPlayer,
@@ -424,7 +431,7 @@ const livePanels = createLivePanelRegistry({
 async function editLivePanel(interaction, player, notice = null) {
   const currentPlayer = music.players.get(interaction.guildId) || player;
   const result = await interaction.editReply(panelPayload(currentPlayer, interaction.guildId, notice));
-  if (currentPlayer?.queue?.current) livePanels.track(interaction);
+  if (currentPlayer?.queue?.current || Number(currentPlayer?.queue?.length || 0) > 0) livePanels.track(interaction);
   else livePanels.pause(interaction);
   return result;
 }
@@ -462,7 +469,7 @@ async function editLivePanel(interaction, player, notice = null) {
       } else {
         const queued = queueTracks(player, [track], { next: true, perRequestLimit: 1 });
         if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-        if (!player.playing && !player.paused) await player.play();
+        await ensureQueuedPlayback(player);
       }
       checkpointRecovery(player);
     });
@@ -482,7 +489,7 @@ async function editLivePanel(interaction, player, notice = null) {
         else {
           const restored = queueTracks(player, tracks, { next: false, perRequestLimit: queueLimit });
           if (!restored.added.length) throw expectedError(`Cannot restore tracks because the queue is full (maximum ${queueLimit}).`);
-          if (!player.playing && !player.paused) await player.play();
+          await ensureQueuedPlayback(player);
         }
         if (snapshot.loop && ['none', 'track', 'queue'].includes(snapshot.loop)) player.setLoop(snapshot.loop);
         if (snapshot.autoplay && ['off', 'standard', 'ai'].includes(snapshot.autoplay)) {
@@ -593,12 +600,13 @@ async function editLivePanel(interaction, player, notice = null) {
         const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);
         const queued = await searchAndQueue(player, query, interaction.user, next, guard, queueTracks, queueLimit, searchPreferred, (task) => withGuildOperation(interaction.guildId, task));
         checkpointRecovery(player);
-        const where = next ? 'Queued next' : 'Queued';
         if (queued.result.type === 'PLAYLIST') {
+          const action = next ? 'Queued next' : queued.started ? '▶️ Started playlist with' : 'Queued';
           const limitNote = queued.omitted ? ` Limited for stability: **${queued.omitted} track${queued.omitted === 1 ? '' : 's'} not added** (max ${MAX_PLAYLIST_ADD} per playlist / ${queueLimit} upcoming).` : '';
-          return interaction.editReply(`${where} **${queued.tracks.length} tracks**.${limitNote}`);
+          return interaction.editReply(`${action} **${queued.tracks.length} tracks**.${limitNote}`);
         }
-        return interaction.editReply(`${where} **${safeTitle(queued.tracks[0])}**.`);
+        const action = next ? 'Queued next' : queued.started ? '▶️ Playing' : 'Queued';
+        return interaction.editReply(`${action} **${safeTitle(queued.tracks[0])}**.`);
       }
 
       if (name === 'ai') {
@@ -638,7 +646,7 @@ async function editLivePanel(interaction, player, notice = null) {
           guard();
           const value = queueTracks(player, resolved);
           if (!value.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-          if (!player.playing && !player.paused) await player.play();
+          await ensureQueuedPlayback(player);
           checkpointRecovery(player);
           return value;
         });
@@ -667,9 +675,19 @@ async function editLivePanel(interaction, player, notice = null) {
       const player = getPlayer(music, interaction.guildId);
       if (name === 'nowplaying') {
         requireSameVoice(interaction, player);
-        requireCurrentTrack(player);
-        await publicNowPlayingReply(interaction, panelPayload(player, interaction.guildId));
-        livePanels.track(interaction);
+        let notice = null;
+        if (!player.queue.current && player.queue.length > 0) {
+          try {
+            await withGuildOperation(interaction.guildId, async () => {
+              await ensureQueuedPlayback(player);
+              checkpointRecovery(player);
+            });
+          } catch (error) {
+            notice = `⚠️ Playback is idle: ${error?.message || 'the queued track could not start.'}`;
+          }
+        }
+        await publicNowPlayingReply(interaction, panelPayload(player, interaction.guildId, notice));
+        if (player.queue.current || player.queue.length > 0) livePanels.track(interaction);
         return;
       }
       requireSameVoice(interaction, player);
@@ -768,7 +786,7 @@ async function handleSearchSelect(interaction, { music, ensurePlayer, queueTrack
     }
     const queued = queueTracks(player, [track], { next: entry.next, perRequestLimit: 1 });
     if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-    if (!player.playing && !player.paused) await player.play();
+    await ensureQueuedPlayback(player);
     checkpointRecovery(player);
   });
   searchPickers.delete(token);

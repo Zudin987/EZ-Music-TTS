@@ -303,6 +303,10 @@ GitHub Actions validates:
 
 
 
+## Search/start reliability (v0.1.9)
+
+Plain-text YTM results now need to resemble the requested title/artist. Weak YTM matches fall through to normal YouTube instead of silently queueing an unrelated song; weak results from both sources are reported as no result. Idle queue starts use Lavalink's actual track state rather than only Kazagumo's wrapper playing flag, and a resolve failure can no longer be reported as a successful queue/start. `/nowplaying` also shows a queue-waiting panel when tracks exist but no current item is active.
+
 ## Search routing and Spotify URLs (v0.1.4)
 
 Plain-text `/play` and `/playnext` searches now try **YouTube Music first** and fall back to normal **YouTube** only when YTM returns no usable result or errors. Direct URLs and explicit prefixes such as `ytsearch:` / `ytmsearch:` are never rewritten. `select:true` uses the same routing, so its private top-five picker is YTM-first too.
