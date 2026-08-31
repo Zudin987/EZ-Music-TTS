@@ -17,6 +17,7 @@ import { resolvePreferredSearch } from './source-routing.js';
 import { emptyVoiceTransition } from './performance.js';
 import { choosePlaybackAlternative, chooseSoundCloudAlternative, isCredentiallessYoutubeBlock, playbackFallbackQueries, playbackFallbackQuery, restoreFallbackQueue, takeFallbackQueueHold, youtubeTrackId } from './playback-fallback.js';
 import { playbackHistoryFingerprint, playbackHistoryReady } from './playback-history.js';
+import { activeTrackMatchesCurrent } from './playback-start.js';
 import { nodeReconnectDelayMs, resolveLifecycleEventTrack, voiceCloseDisposition, VOICE_CLOSE_RECOVERY_GRACE_MS } from './lavalink-lifecycle.js';
 
 const MAX_UPCOMING_QUEUE = 300;
@@ -1190,6 +1191,14 @@ export function createMusic(client, config, gemini) {
   }
 
   async function handlePlayerStart(player, track) {
+    // Kazagumo emits queue.current for playerStart instead of the TrackStartEvent
+    // payload. A late start from a replaced track can therefore be mislabeled as
+    // the newer queue.current. Shoukaku keeps the actual encoded Lavalink track;
+    // reject any mismatch before it can pollute history/status/recovery state.
+    if (!activeTrackMatchesCurrent(player)) {
+      console.warn('[player-start]', player.guildId, 'stale/mismatched TrackStart ignored');
+      return;
+    }
     clearDisconnect(player.guildId);
     clearEmptyVoiceTimer(player.guildId);
     clearVoiceCloseRecoveryTimer(player.guildId);
