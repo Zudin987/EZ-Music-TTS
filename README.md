@@ -303,6 +303,10 @@ GitHub Actions validates:
 
 
 
+## Search/playback fallback reliability (v0.1.10)
+
+Title-only searches that produce an exact but artist-ambiguous YouTube Music result now compare normal YouTube before choosing, preventing same-title uploads from unrelated channels from silently winning. Current youtube-source can still hit YouTube's credential/login/SABR block even for the correct video; when that known all-clients failure occurs, EZ Music now searches the already-enabled SoundCloud source for a relevance-checked standard version of the same title and replaces the failed YouTube item automatically. Other playback exceptions can still try one alternate normal-YouTube result before SoundCloud. The short upstream-recommended YouTube client chain is retained because live testing showed extra MWEB/ANDROID_MUSIC clients hit the same login block. No OAuth, poToken worker, yt-dlp, DSP, heap increase, or extra process is introduced.
+
 ## Search/start reliability (v0.1.9)
 
 Plain-text YTM results now need to resemble the requested title/artist. Weak YTM matches fall through to normal YouTube instead of silently queueing an unrelated song; weak results from both sources are reported as no result. Idle queue starts use Lavalink's actual track state rather than only Kazagumo's wrapper playing flag, and a resolve failure can no longer be reported as a successful queue/start. `/nowplaying` also shows a queue-waiting panel when tracks exist but no current item is active.

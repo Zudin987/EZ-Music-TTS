@@ -124,9 +124,11 @@ test('unconfigured Spotify track uses oEmbed metadata then YTM', async () => {
   );
   assert.equal(result.tracks[0].title, 'Never Gonna Give You Up');
   assert.equal(oembed.calls.length, 1);
-  assert.equal(target.calls.length, 1);
+  assert.equal(target.calls.length, 2);
   assert.equal(target.calls[0].query, 'Never Gonna Give You Up');
   assert.equal(target.calls[0].options.source, 'ytmsearch:');
+  assert.equal(target.calls[1].query, 'Never Gonna Give You Up');
+  assert.equal(target.calls[1].options.source, 'ytsearch:');
 });
 
 test('configured Spotify track uses LavaSrc directly when it works', async () => {
@@ -159,7 +161,7 @@ test('configured but unusable Spotify track automatically falls back through oEm
   );
   assert.equal(result.tracks[0].title, 'Never Gonna Give You Up');
   assert.equal(oembed.calls.length, 1);
-  assert.deepEqual(target.calls.map((call) => call.options.source), [undefined, 'ytmsearch:']);
+  assert.deepEqual(target.calls.map((call) => call.options.source), [undefined, 'ytmsearch:', 'ytsearch:']);
 });
 
 test('Spotify short track link resolves to a canonical URL before configured LavaSrc', async () => {
@@ -200,7 +202,7 @@ test('oEmbed response is size-bounded before body parsing', async () => {
 });
 
 test('Spotify remains optional and LavaSrc provider order stays YTM before YouTube', () => {
-  assert.equal(pkg.version, '0.1.9');
+  assert.equal(pkg.version, '0.1.10');
   assert.match(envExample, /Single Spotify track links work without these credentials/i);
   assert.match(config, /spotifyClientId/);
   assert.match(config, /spotifyClientSecret/);

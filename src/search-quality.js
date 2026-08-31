@@ -64,6 +64,17 @@ function coverage(queryTokens, candidateTokens) {
   return matched / queryTokens.length;
 }
 
+export function isAmbiguousTitleOnlyMatch(query, track) {
+  const queryTokens = tokens(query);
+  if (queryTokens.length < 2) return false;
+  const titleTokens = tokens(track?.title);
+  const authorTokens = tokens(track?.author);
+  // Example: "Heavy Serenade" perfectly matches many unrelated uploads. If
+  // every query token is only in the title and none identify the uploader/artist,
+  // compare normal YouTube ranking before accepting the YTM result.
+  return coverage(queryTokens, titleTokens) === 1 && coverage(queryTokens, authorTokens) === 0;
+}
+
 export function searchTrackScore(query, track) {
   const queryTokens = tokens(query);
   if (!queryTokens.length) return 0;
