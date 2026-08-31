@@ -1,152 +1,149 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { createLivePanelRegistry } from '../src/live-panel.js';
+import { readFileSync } from 'node:fs';
 
 function fakeScheduler() {
-  let nextId = 1;
-  const active = new Map();
-  let starts = 0;
-  let clears = 0;
+  const state = { starts: 0, clears: 0, callback: null };
   return {
-    setIntervalFn(fn, ms) {
-      const id = nextId++;
-      active.set(id, { fn, ms });
-      starts += 1;
-      return id;
+    state,
+    setIntervalFn(callback) {
+      state.starts += 1;
+      state.callback = callback;
+      return { unref() {} };
     },
-    clearIntervalFn(id) {
-      if (active.delete(id)) clears += 1;
-    },
-    async tick() {
-      for (const { fn } of [...active.values()]) await fn();
-    },
-    state: {
-      get starts() { return starts; },
-      get clears() { return clears; },
-      get active() { return active.size; },
+    clearIntervalFn() {
+      state.clears += 1;
+      state.callback = null;
     },
   };
 }
 
-function fakeInteraction(guildId, userId = 'user-1', createdTimestamp = Date.now()) {
-  let edits = 0;
+function fakeInteraction(id, { guildId = 'guild', userId = 'user', createdTimestamp = 1_000, ephemeral = true } = {}) {
+  const edits = [];
   return {
+    id,
     guildId,
     user: { id: userId },
     createdTimestamp,
-    webhook: {
-      async editMessage() { edits += 1; },
+    ephemeral,
+    edits,
+    async editReply(payload) {
+      edits.push(payload);
+      return payload;
     },
-    get edits() { return edits; },
   };
 }
 
 test('live registry keeps only the newest private panel per guild/user', async () => {
+  let now = 1_000;
   const scheduler = fakeScheduler();
   const registry = createLivePanelRegistry({
-    render: async () => ({ payload: { content: 'ok' } }),
+    now: () => now,
+    render: (interaction) => ({ content: interaction.id }),
     setIntervalFn: scheduler.setIntervalFn,
     clearIntervalFn: scheduler.clearIntervalFn,
   });
-  const first = fakeInteraction('g1', 'u1');
-  const second = fakeInteraction('g1', 'u1');
-  registry.track(first);
-  registry.track(second);
+  const first = fakeInteraction('first');
+  const second = fakeInteraction('second');
+  assert.equal(registry.track(first), true);
+  assert.equal(registry.track(second), true);
   assert.equal(registry.size(), 1);
   assert.equal(scheduler.state.starts, 1);
-  assert.equal(scheduler.state.active, 1);
-  await scheduler.tick();
-  assert.equal(first.edits, 0);
-  assert.equal(second.edits, 1);
+  await registry.tick();
+  assert.equal(first.edits.length, 0);
+  assert.deepEqual(second.edits, [{ content: 'second' }]);
+  registry.shutdown();
 });
 
-test('different users can each have one private live panel and maxEntries evicts oldest', async () => {
+test('different users can each have one private live panel and maxEntries evicts oldest', () => {
   const scheduler = fakeScheduler();
   const registry = createLivePanelRegistry({
     maxEntries: 2,
-    render: async () => ({ payload: { content: 'ok' } }),
+    render: () => ({ content: 'ok' }),
     setIntervalFn: scheduler.setIntervalFn,
     clearIntervalFn: scheduler.clearIntervalFn,
   });
-  const first = fakeInteraction('g1', 'u1');
-  const second = fakeInteraction('g1', 'u2');
-  const third = fakeInteraction('g2', 'u3');
-  registry.track(first);
-  registry.track(second);
-  registry.track(third);
+  const now = Date.now();
+  const a = fakeInteraction('a', { userId: 'a', createdTimestamp: now });
+  const b = fakeInteraction('b', { userId: 'b', createdTimestamp: now });
+  const c = fakeInteraction('c', { userId: 'c', createdTimestamp: now });
+  registry.track(a);
+  registry.track(b);
+  registry.track(c);
   assert.equal(registry.size(), 2);
-  await scheduler.tick();
-  assert.equal(first.edits, 0);
-  assert.equal(second.edits, 1);
-  assert.equal(third.edits, 1);
+  assert.equal(registry.has(a), false);
+  assert.equal(registry.has(b), true);
+  assert.equal(registry.has(c), true);
+  registry.shutdown();
 });
 
 test('public live panels share one guild lease regardless of which user refreshes it', async () => {
   const scheduler = fakeScheduler();
   const registry = createLivePanelRegistry({
-    render: async () => ({ payload: { content: 'ok' } }),
+    render: (interaction) => ({ content: interaction.id }),
     setIntervalFn: scheduler.setIntervalFn,
     clearIntervalFn: scheduler.clearIntervalFn,
   });
-  const first = fakeInteraction('g1', 'u1');
-  const second = fakeInteraction('g1', 'u2');
-  registry.track(first, { visibility: 'public' });
-  registry.track(second, { visibility: 'public' });
+  const a = fakeInteraction('public-a', { userId: 'a', ephemeral: false, createdTimestamp: Date.now() });
+  const b = fakeInteraction('public-b', { userId: 'b', ephemeral: false, createdTimestamp: Date.now() });
+  registry.track(a);
+  registry.track(b);
   assert.equal(registry.size(), 1);
-  await scheduler.tick();
-  assert.equal(first.edits, 0);
-  assert.equal(second.edits, 1);
+  await registry.tick();
+  assert.equal(a.edits.length, 0);
+  assert.deepEqual(b.edits, [{ content: 'public-b' }]);
+  registry.shutdown();
 });
 
 test('expired lease gets one final retiring render then stops', async () => {
+  let now = 10_000;
   const scheduler = fakeScheduler();
-  let now = 1000;
-  const renderStates = [];
+  const retiring = [];
+  const interaction = fakeInteraction('lease', { createdTimestamp: now });
   const registry = createLivePanelRegistry({
-    intervalMs: 100,
-    maxAgeMs: 500,
+    ttlMs: 100,
     now: () => now,
-    render: async (_interaction, state) => {
-      renderStates.push(state);
-      return { payload: { content: state.retiring ? 'retiring' : 'live' } };
+    render: (_interaction, state) => {
+      retiring.push(state.retiring);
+      return { content: state.retiring ? 'expired' : 'live' };
     },
     setIntervalFn: scheduler.setIntervalFn,
     clearIntervalFn: scheduler.clearIntervalFn,
   });
-  const interaction = fakeInteraction('g1', 'u1');
   registry.track(interaction);
-  now = 1600;
-  await scheduler.tick();
-  assert.equal(interaction.edits, 1);
-  assert.equal(renderStates[0].retiring, true);
+  await registry.tick();
+  assert.deepEqual(retiring, [false]);
+  now += 100;
+  await registry.tick();
+  assert.deepEqual(retiring, [false, true]);
+  assert.deepEqual(interaction.edits, [{ content: 'live' }, { content: 'expired' }]);
   assert.equal(registry.size(), 0);
-  assert.equal(scheduler.state.active, 0);
+  assert.equal(scheduler.state.clears, 1);
 });
 
 test('render can stop a live panel after a final idle update', async () => {
   const scheduler = fakeScheduler();
+  const interaction = fakeInteraction('idle', { createdTimestamp: Date.now() });
   const registry = createLivePanelRegistry({
-    render: async () => ({ payload: { content: 'idle' }, stopAfter: true }),
+    render: () => ({ payload: { content: 'idle' }, stopAfter: true }),
     setIntervalFn: scheduler.setIntervalFn,
     clearIntervalFn: scheduler.clearIntervalFn,
   });
-  const interaction = fakeInteraction('g1', 'u1');
   registry.track(interaction);
-  await scheduler.tick();
-  assert.equal(interaction.edits, 1);
+  await registry.tick();
+  assert.deepEqual(interaction.edits, [{ content: 'idle' }]);
   assert.equal(registry.size(), 0);
-  assert.equal(scheduler.state.active, 0);
 });
 
 test('pause immediately removes the matching live lease', () => {
   const scheduler = fakeScheduler();
+  const interaction = fakeInteraction('pause', { createdTimestamp: Date.now() });
   const registry = createLivePanelRegistry({
-    render: async () => ({ payload: { content: 'ok' } }),
+    render: () => ({ content: 'ok' }),
     setIntervalFn: scheduler.setIntervalFn,
     clearIntervalFn: scheduler.clearIntervalFn,
   });
-  const interaction = fakeInteraction('g1', 'u1');
   registry.track(interaction);
   assert.equal(registry.pause(interaction), true);
   assert.equal(registry.size(), 0);
