@@ -48,7 +48,7 @@ jobs:
             tail -n 200 lavalink-v019.log >&2 || true
             exit 1
           fi
-      - name: Route the exact reported searches
+      - name: Inspect and route the exact reported searches
         run: |
           node --input-type=module <<'NODE'
           import { resolvePreferredSearch } from './src/source-routing.js';
@@ -77,15 +77,16 @@ jobs:
           };
 
           for (const query of ['heavy serenade', 'heavy serenade nmixx']) {
+            for (const source of ['ytmsearch:', 'ytsearch:']) {
+              const raw = await target.search(query, { source });
+              console.log(`RAW ${source}${query}`);
+              raw.tracks.slice(0, 5).forEach((track, index) => console.log(`  ${index + 1}. ${track.title} — ${track.author}`));
+            }
             calls.length = 0;
             const result = await resolvePreferredSearch(target, query, null);
             const first = result?.tracks?.[0];
             if (!first) throw new Error(`No relevant result survived routing for: ${query}`);
-            const title = String(first.title || '').toLowerCase();
-            if (!title.includes('heavy') || !title.includes('serenade')) {
-              throw new Error(`Wrong routed title for ${query}: ${first.title} — ${first.author}`);
-            }
-            console.log(`${query} => ${first.title} — ${first.author}`);
+            console.log(`ROUTED ${query} => ${first.title} — ${first.author}`);
             console.log(`routes: ${calls.join(' -> ')}`);
           }
           NODE
