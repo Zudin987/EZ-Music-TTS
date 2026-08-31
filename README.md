@@ -326,3 +326,12 @@ Typed `/play <song name>` and `/playnext <song name>` requests now stay private 
 ## Ghost playback start fix (v0.1.12)
 
 Playback start/recovery now verifies that Lavalink/Shoukaku's active encoded track is the **same encoded track as Kazagumo's current queue item**. A stale non-empty Shoukaku track from an earlier failed/replaced source can no longer make EZ Music show a new song at 0:00 without ever sending it to Lavalink. Typed picker choices, direct URLs and `/nowplaying` recovery all use the corrected start gate; `/status` only reports **Playing** for an exact active/current match. Manual pause protection remains intact. This fix does not change buffers, DSP, heap caps, source clients or add background polling.
+
+
+## YouTube fallback race fix (v0.1.13)
+
+When YouTube metadata/search works but playback is rejected by every anonymous playback client, EZ Music temporarily holds upcoming tracks before Kazagumo can auto-advance through them. It then tries a bounded SoundCloud fallback using up to three cleaned queries (for example, noisy `ADO - NEW GENESIS ... OST | Lirik & Terjemahan` metadata is reduced to `Ado New Genesis`). A successful fallback restores the held queue in its original order; a manual Skip cancels the pending fallback and continues safely. New queue additions made while fallback is running join the temporary hold instead of racing it.
+
+Recent History now records a track only after Lavalink reports at least 2 seconds of real playback progress. A `TrackStart` immediately followed by YouTube login/SABR failure no longer appears as a successfully heard song.
+
+This hotfix intentionally keeps the existing single-process Node + single local Lavalink architecture. It does not enable YouTube OAuth, add a remote poToken/webpo service, alter the YouTube client chain, enable DSP, or change the existing buffer/heap caps.
