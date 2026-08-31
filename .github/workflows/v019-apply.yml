@@ -41,3 +41,5 @@ jobs:
           git add README.md package.json package-lock.json src/commands.js src/source-routing.js src/ui.js
           git commit -m "fix: improve search matching and idle playback start"
           git push origin HEAD:fix/v019-search-start-nowplaying
+
+# Re-run after updating legacy fixtures for relevance-aware search and queue-aware Now Playing.
