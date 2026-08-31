@@ -335,3 +335,12 @@ When YouTube metadata/search works but playback is rejected by every anonymous p
 Recent History now records a track only after Lavalink reports at least 2 seconds of real playback progress. A `TrackStart` immediately followed by YouTube login/SABR failure no longer appears as a successfully heard song.
 
 This hotfix intentionally keeps the existing single-process Node + single local Lavalink architecture. It does not enable YouTube OAuth, add a remote poToken/webpo service, alter the YouTube client chain, enable DSP, or change the existing buffer/heap caps.
+
+
+## Transport lifecycle hardening (v0.1.14)
+
+EZ Music now treats Lavalink-node state, Discord voice-WebSocket state, and track-event identity as separate lifecycle signals instead of assuming a cached Kazagumo player is healthy. Shoukaku 4.3.0's multi-attempt reconnect bug is avoided by using one library reconnect attempt at a time plus a tiny event-driven local-node supervisor with bounded backoff. If the local Lavalink session is genuinely lost, live players are snapshotted to SQLite and retired rather than left as ghost players; `/status` exposes reconnecting/unavailable node state and `/play` refuses to queue into a dead node.
+
+Discord voice-WebSocket closes are also watched: close codes that Discord says should not reconnect retire the stale player immediately, while other closes get a short recovery grace window and are retired only if no connected player update arrives. Lavalink v4's event-provided Track object is used to reject late TrackException/TrackStuck events from a previous song, preventing a stale event from skipping or source-fallbacking the new current song.
+
+This hardening is event-driven and adds no polling service, audio filters, extra Lavalink node, buffer increase, or heap increase.

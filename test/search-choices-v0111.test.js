@@ -103,7 +103,7 @@ test('choice kind labels identify common upload types', () => {
   assert.equal(searchChoiceKind(track('Song', 'Artist', 'e'), 'youtube'), 'YouTube');
 });
 
-test('v0.1.11 command/UI defaults to three-choice typed search and keeps low-memory playback unchanged', () => {
+test('three-choice typed search keeps the v0.1.14 low-memory playback profile', () => {
   const commands = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const ui = fs.readFileSync(new URL('../src/ui.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const picker = fs.readFileSync(new URL('../src/search-picker.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -111,7 +111,7 @@ test('v0.1.11 command/UI defaults to three-choice typed search and keeps low-mem
   const start = fs.readFileSync(new URL('../start-bot.bat', import.meta.url), 'utf8');
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
-  assert.equal(pkg.version, '0.1.13');
+  assert.equal(pkg.version, '0.1.14');
   assert.match(pkg.scripts.check, /src\/search-choices\.js/);
   assert.match(commands, /shouldOfferSearchChoices\(query\)/);
   assert.match(commands, /resolveSearchChoices\(music, query, interaction\.user, \{ limit: 3 \}\)/);

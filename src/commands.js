@@ -386,6 +386,7 @@ export function createInteractionHandler({
   getQueueLimit,
   getRuntimeStats,
   getSourceHealth,
+  getLavalinkNodeHealth,
   isAutoPausedForEmptyVoice,
   discardHeldQueue,
   getHeldQueueSnapshot,
@@ -541,8 +542,13 @@ async function editLivePanel(interaction, player, notice = null) {
         const health = getSourceHealth(interaction.guildId);
         const runtime = await getRuntimeStats();
         const recovery = !player ? getRecoverableSession(interaction.guildId) : null;
-        let lavalink = 'Unavailable';
-        try { await music.getLeastUsedNode(); lavalink = 'Connected'; } catch { /* no online node */ }
+        const nodeHealth = getLavalinkNodeHealth();
+        const nodeRetrySeconds = nodeHealth.retryAt > Date.now() ? Math.max(1, Math.ceil((nodeHealth.retryAt - Date.now()) / 1000)) : 0;
+        const lavalink = nodeHealth.status === 'connected'
+          ? 'Connected'
+          : nodeHealth.status === 'reconnecting'
+            ? `Reconnecting${nodeRetrySeconds ? ` • retry in ~${nodeRetrySeconds}s` : ''}`
+            : nodeHealth.status === 'starting' ? 'Starting' : 'Unavailable';
 
         const lines = [
           `Discord gateway: **Online** (${Math.max(0, Math.round(client.ws.ping))} ms)`,
