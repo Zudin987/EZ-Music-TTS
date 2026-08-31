@@ -76,18 +76,20 @@ jobs:
             },
           };
 
-          const banned = /\b(cover|karaoke|instrumental|remix|acoustic|nightcore|slowed|live)\b|\bsped\s+up\b/i;
+          const bannedTitle = /\b(cover|karaoke|instrumental|remix|acoustic|nightcore|slowed|live)\b|\bsped\s+up\b/i;
+          const bannedAuthor = /\b(cover|karaoke|instrumental|piano|tribute)\b/i;
           for (const query of ['heavy serenade', 'heavy serenade nmixx']) {
             calls.length = 0;
             const result = await resolvePreferredSearch(target, query, null);
             const first = result?.tracks?.[0];
             if (!first) throw new Error(`No relevant result survived routing for: ${query}`);
             const title = String(first.title || '');
-            const combined = `${first.title || ''} ${first.author || ''}`;
+            const author = String(first.author || '');
+            const combined = `${title} ${author}`;
             if (!/heavy/i.test(title) || !/serenade/i.test(title)) {
               throw new Error(`Wrong title for ${query}: ${first.title} — ${first.author}`);
             }
-            if (banned.test(title)) {
+            if (bannedTitle.test(title) || bannedAuthor.test(author)) {
               throw new Error(`Unrequested alternate version survived for ${query}: ${first.title} — ${first.author}`);
             }
             if (/nmixx/i.test(query) && !/nmixx/i.test(combined)) {
@@ -109,3 +111,5 @@ jobs:
       - name: Show Lavalink log on failure
         if: failure()
         run: tail -n 200 lavalink-v019.log || true
+
+# Final live rerun after source/uploader variant filtering.
