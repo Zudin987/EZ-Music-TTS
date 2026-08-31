@@ -39,16 +39,10 @@ jobs:
           cd ..
           ready=0
           for attempt in {1..90}; do
-            if curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/version >/dev/null; then
-              ready=1
-              break
-            fi
+            if curl -fsS -H 'Authorization: ezmusic-local-only' http://127.0.0.1:2333/version >/dev/null; then ready=1; break; fi
             sleep 2
           done
-          if [ "$ready" -ne 1 ]; then
-            tail -n 200 lavalink-v0110.log >&2 || true
-            exit 1
-          fi
+          if [ "$ready" -ne 1 ]; then tail -n 200 lavalink-v0110.log >&2 || true; exit 1; fi
       - name: Resolve exact reported query through real sources
         run: |
           node --input-type=module <<'NODE'
@@ -64,38 +58,47 @@ jobs:
               if (!response.ok) throw new Error(`Lavalink ${response.status}`);
               const body = await response.json();
               const raw = body.loadType === 'search' ? body.data : body.loadType === 'track' ? [body.data] : [];
-              return {
-                type: body.loadType === 'search' ? 'SEARCH' : body.loadType?.toUpperCase?.() || 'EMPTY',
-                tracks: raw.map((item) => ({ ...(item.info || {}), encoded: item.encoded })),
-              };
+              return { type: body.loadType === 'search' ? 'SEARCH' : body.loadType?.toUpperCase?.() || 'EMPTY', tracks: raw.map((item) => ({ ...(item.info || {}), encoded: item.encoded })) };
             },
           };
           const result = await resolvePreferredSearch(target, 'Heavy Serenade', null);
           const first = result?.tracks?.[0];
-          if (!first) throw new Error('No Heavy Serenade result survived routing');
-          const combined = `${first.title || ''} ${first.author || ''}`;
-          if (!/heavy/i.test(first.title || '') || !/serenade/i.test(first.title || '')) {
-            throw new Error(`Wrong title selected: ${first.title} — ${first.author}`);
-          }
-          if (!/nmixx|jyp/i.test(combined)) {
-            throw new Error(`Ambiguous/unrelated uploader still won: ${first.title} — ${first.author}`);
-          }
-          if (calls[0] !== 'ytmsearch:Heavy Serenade' || calls[1] !== 'ytsearch:Heavy Serenade') {
-            throw new Error(`Expected ambiguity comparison YTM -> YouTube, got ${calls.join(' -> ')}`);
-          }
+          if (!first || !/heavy/i.test(first.title || '') || !/serenade/i.test(first.title || '')) throw new Error(`Wrong/no selection: ${first?.title} — ${first?.author}`);
+          if (!/nmixx|jyp/i.test(`${first.title || ''} ${first.author || ''}`)) throw new Error(`Ambiguous uploader still won: ${first.title} — ${first.author}`);
+          if (calls[0] !== 'ytmsearch:Heavy Serenade' || calls[1] !== 'ytsearch:Heavy Serenade') throw new Error(`Expected YTM -> YouTube comparison, got ${calls.join(' -> ')}`);
           console.log(`selected: ${first.title} — ${first.author}`);
           console.log(`uri: ${first.uri}`);
-          console.log(`routes: ${calls.join(' -> ')}`);
           NODE
-      - name: Confirm official video metadata loads
+      - name: Confirm current YouTube block and inspect SoundCloud fallback
         run: |
-          set -euo pipefail
-          body="$(curl -fsSG -H 'Authorization: ezmusic-local-only' --data-urlencode 'identifier=https://www.youtube.com/watch?v=6Ycn9qZK09I' http://127.0.0.1:2333/v4/loadtracks)"
-          printf '%s' "$body" | grep -q 'Heavy Serenade'
+          node --input-type=module <<'NODE'
+          async function load(identifier) {
+            const url = new URL('http://127.0.0.1:2333/v4/loadtracks');
+            url.searchParams.set('identifier', identifier);
+            const response = await fetch(url, { headers: { Authorization: 'ezmusic-local-only' } });
+            const body = await response.json();
+            return body;
+          }
+          const youtube = await load('https://www.youtube.com/watch?v=6Ycn9qZK09I');
+          if (youtube.loadType !== 'error') throw new Error(`Expected current credential-free YouTube direct load to expose upstream block; got ${youtube.loadType}`);
+          console.log('YouTube direct load currently blocked as expected by upstream issue.');
+
+          for (const query of ['scsearch:NMIXX Heavy Serenade', 'scsearch:Heavy Serenade']) {
+            const body = await load(query);
+            const tracks = body.loadType === 'search' ? body.data : [];
+            console.log(`SoundCloud ${query}:`, tracks.slice(0, 5).map((item) => `${item.info?.title} — ${item.info?.author}`).join(' | '));
+            const match = tracks.find((item) => /heavy/i.test(item.info?.title || '') && /serenade/i.test(item.info?.title || ''));
+            if (match) {
+              console.log(`SoundCloud candidate: ${match.info.title} — ${match.info.author} — ${match.info.uri}`);
+              process.exit(0);
+            }
+          }
+          throw new Error('No Heavy Serenade SoundCloud fallback candidate found');
+          NODE
       - name: Stop Lavalink
         if: always()
         run: |
           if [ -f lavalink-v0110.pid ]; then kill "$(cat lavalink-v0110.pid)" 2>/dev/null || true; fi
       - name: Show log on failure
         if: failure()
-        run: tail -n 200 lavalink-v0110.log || true
+        run: tail -n 120 lavalink-v0110.log || true
