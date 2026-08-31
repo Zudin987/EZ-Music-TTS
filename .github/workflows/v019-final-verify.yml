@@ -1,0 +1,33 @@
+name: Final-verify v0.1.9 product fixes
+
+on:
+  push:
+    branches:
+      - fix/v019-search-start-nowplaying
+    paths:
+      - .github/workflows/v019-final-verify.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/v019-search-start-nowplaying
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Preserve low-memory playback profile
+        run: |
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+          grep -q -- '-Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
