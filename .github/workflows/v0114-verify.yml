@@ -6,6 +6,7 @@ on:
       - fix/v0114-lifecycle-hardening
     paths:
       - scripts/apply-v0114-lifecycle.py
+      - scripts/refine-v0114-tests.py
       - .github/workflows/v0114-verify.yml
 
 permissions:
@@ -25,7 +26,9 @@ jobs:
           node-version: 22.14.0
           cache: npm
       - name: Apply audited patch
-        run: python3 scripts/apply-v0114-lifecycle.py
+        run: |
+          python3 scripts/apply-v0114-lifecycle.py
+          python3 scripts/refine-v0114-tests.py
       - name: Locked clean install
         run: npm ci
       - name: Syntax checks
@@ -56,7 +59,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add README.md package.json package-lock.json src/music.js src/commands.js src/lavalink-lifecycle.js test/lavalink-lifecycle-v0114.test.js
+          git add README.md package.json package-lock.json src/music.js src/commands.js src/lavalink-lifecycle.js test/lavalink-lifecycle-v0114.test.js test/playback-fallback-v0113.test.js test/search-choices-v0111.test.js test/source-routing.test.js
           git diff --cached --check
           git commit -m 'fix: harden Lavalink and voice lifecycle handling'
           git push origin HEAD:fix/v0114-lifecycle-hardening
