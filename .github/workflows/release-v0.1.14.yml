@@ -1,0 +1,126 @@
+name: Release v0.1.14
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.14.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: b0c5dc27d995d24aefa54b3ac7245cefe1264be6
+      TAG: v0.1.14
+      ZIP_NAME: EZ-Music-v0.1.14-Windows-Clean.zip
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify exact product target
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "$TARGET_SHA^{commit}"
+          test "$(git show "$TARGET_SHA:package.json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).version))")" = "0.1.14"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build clean Windows package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist package-root
+          mkdir -p package-root/EZ-Music dist
+          git archive --format=tar "$TARGET_SHA" | tar -xf - -C package-root/EZ-Music
+
+          # User package: keep runtime/source/setup files, not repository CI/tests.
+          rm -rf package-root/EZ-Music/.github package-root/EZ-Music/test package-root/EZ-Music/scripts
+
+          # Defense-in-depth exclusions for any local/runtime state.
+          rm -f package-root/EZ-Music/.env
+          rm -rf package-root/EZ-Music/node_modules
+          rm -f package-root/EZ-Music/lavalink/Lavalink.jar
+          find package-root/EZ-Music -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '*.log' -o -name '*.pid' -o -name 'stop.requested' \) -delete
+          find package-root/EZ-Music -type d \( -name 'plugins' -o -name '.cache' \) -prune -exec rm -rf {} + || true
+          mkdir -p package-root/EZ-Music/data package-root/EZ-Music/lavalink
+
+          cat > package-root/EZ-Music/CLEAN-INSTALL.txt <<'EOF'
+EZ Music v0.1.14 - Clean Windows package
+
+This archive intentionally does NOT contain your private/runtime files:
+- .env
+- data/ez-music.sqlite (or other SQLite databases)
+- node_modules
+- Lavalink.jar
+- logs, PID files, plugin caches, or stop markers
+
+Upgrade from an existing install:
+1. Back up your existing .env.
+2. If you want to preserve favorites/history/recovery/settings, also back up data\ez-music.sqlite.
+3. Extract this clean package to a fresh folder.
+4. Restore .env and, if desired, data\ez-music.sqlite.
+5. Run setup.bat.
+6. Start with start-bot.bat (or reinstall the scheduled task if needed).
+
+Do not copy old node_modules, Lavalink.jar, logs, or cache folders into the new install.
+EOF
+
+          (cd package-root/EZ-Music && zip -q -r "../../dist/$ZIP_NAME" .)
+          (cd dist && sha256sum "$ZIP_NAME" > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > dist/RELEASE-NOTES.md <<'EOF'
+## EZ Music v0.1.14
+
+Reliability hardening focused on Lavalink and Discord voice lifecycle failures rather than audio tuning.
+
+### Fixed
+- Works around the Shoukaku 4.3.0 multi-attempt reconnect bug by using one library reconnect attempt at a time plus a bounded event-driven local-node replacement supervisor.
+- If Lavalink reconnects with a fresh server session, stale Kazagumo players are checkpointed to SQLite and retired instead of being reused as ghost players.
+- Discord voice WebSocket closures are handled explicitly: non-reconnectable close codes retire safely immediately, while transient closes receive a short recovery grace window.
+- Late TrackException/TrackStuck events are matched to the encoded Lavalink track, so an old event cannot skip or fallback a newer current song.
+- `/status` distinguishes Connected, Starting, Reconnecting, and Unavailable Lavalink states; new queue work is rejected while the local node is genuinely unavailable.
+
+### Validation
+- Dedicated lifecycle verifier passed.
+- Full regression suite: 151/151 passed.
+- Pull-request CI passed on Ubuntu and Windows.
+- Standalone Lavalink + YouTube/LavaSrc smoke test passed.
+- Post-merge `main` CI passed on Ubuntu, Windows, and Lavalink smoke.
+
+### Unchanged performance/audio profile
+- Single Node process + one local Lavalink process.
+- Java heap remains `-Xms64M -Xmx256M`.
+- Node heap cap remains `--max-old-space-size=128`.
+- Lavalink buffers remain 2s source / 20s frame with non-allocating frame buffer.
+- DSP remains disabled except normal volume.
+- No extra Lavalink node, service, dashboard, polling daemon, OAuth, or remote poToken/webpo service.
+
+The clean Windows ZIP intentionally excludes `.env`, SQLite data, `node_modules`, Lavalink.jar, logs, plugin caches, PID/runtime files, tests, CI workflows, and one-time audit tooling. Preserve your existing `.env` and optionally `data\\ez-music.sqlite` before upgrading.
+EOF
+
+          gh release create "$TAG" \
+            "dist/$ZIP_NAME" \
+            dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "EZ Music v0.1.14" \
+            --notes-file dist/RELEASE-NOTES.md
