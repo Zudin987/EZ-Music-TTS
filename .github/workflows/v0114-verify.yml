@@ -1,0 +1,62 @@
+name: Verify v0.1.14 lifecycle hardening
+
+on:
+  push:
+    branches:
+      - fix/v0114-lifecycle-hardening
+    paths:
+      - scripts/apply-v0114-lifecycle.py
+      - .github/workflows/v0114-verify.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/v0114-lifecycle-hardening
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply audited patch
+        run: python3 scripts/apply-v0114-lifecycle.py
+      - name: Locked clean install
+        run: npm ci
+      - name: Syntax checks
+        run: npm run check
+      - name: Full regression suite
+        run: npm test
+      - name: Low-memory and raw-audio invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q -- '-Xms64M -Xmx256M' start-bot.bat
+          grep -q -- '--max-old-space-size=128' start-bot.bat
+          grep -q 'bufferDurationMs: 2000' lavalink/application.yml
+          grep -q 'frameBufferDurationMs: 20000' lavalink/application.yml
+          grep -q 'nonAllocatingFrameBuffer: true' lavalink/application.yml
+          grep -q 'useSeekGhosting: false' lavalink/application.yml
+          grep -q 'timescale: false' lavalink/application.yml
+          grep -q 'karaoke: false' lavalink/application.yml
+          grep -q 'tremolo: false' lavalink/application.yml
+          grep -q 'vibrato: false' lavalink/application.yml
+          grep -q 'rotation: false' lavalink/application.yml
+          grep -q 'distortion: false' lavalink/application.yml
+          grep -q 'channelMix: false' lavalink/application.yml
+          grep -q 'lowPass: false' lavalink/application.yml
+      - name: Commit verified product patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md package.json package-lock.json src/music.js src/commands.js src/lavalink-lifecycle.js test/lavalink-lifecycle-v0114.test.js
+          git diff --cached --check
+          git commit -m 'fix: harden Lavalink and voice lifecycle handling'
+          git push origin HEAD:fix/v0114-lifecycle-hardening
