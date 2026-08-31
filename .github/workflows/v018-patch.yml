@@ -1,0 +1,502 @@
+name: Bootstrap v0.1.8 Spotify fallback patch
+
+on:
+  push:
+    branches:
+      - feat/v018-spotify-oembed-performance
+    paths:
+      - .github/workflows/v018-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'chore: bootstrap v0.1.8 patch runner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feat/v018-spotify-oembed-performance
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.14.0'
+          cache: npm
+
+      - name: Apply Spotify oEmbed fallback and playback hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > src/source-routing.js <<'EOF'
+          const SPOTIFY_HOST = 'open.spotify.com';
+          const SPOTIFY_SHORT_HOST = 'spotify.link';
+          const SPOTIFY_ID_RE = /^[A-Za-z0-9]{22}$/;
+          const SPOTIFY_TYPES = new Set(['track', 'album', 'playlist']);
+          const SPOTIFY_OEMBED_ENDPOINT = 'https://open.spotify.com/oembed';
+          const SPOTIFY_OEMBED_TIMEOUT_MS = 2_500;
+          const SPOTIFY_OEMBED_MAX_BYTES = 64 * 1024;
+
+          function unsupportedSpotify(message = null) {
+            return {
+              spotify: true,
+              supported: false,
+              short: false,
+              type: null,
+              id: null,
+              error: message || 'Unsupported Spotify reference. EZ Music supports Spotify track, album, or playlist references only.',
+            };
+          }
+
+          export function classifySpotifyInput(value) {
+            const text = String(value || '').trim();
+            if (!text) return { spotify: false, supported: false, short: false, type: null, id: null, error: null };
+
+            if (/^spotify:/i.test(text)) {
+              const match = text.match(/^spotify:([a-z]+):([A-Za-z0-9]+)$/i);
+              if (!match) return unsupportedSpotify('Malformed Spotify URI. EZ Music supports spotify:track, spotify:album, and spotify:playlist references with a valid Spotify ID.');
+              const type = match[1].toLowerCase();
+              const id = match[2];
+              if (!SPOTIFY_TYPES.has(type) || !SPOTIFY_ID_RE.test(id)) return unsupportedSpotify();
+              return { spotify: true, supported: true, short: false, type, id, error: null };
+            }
+
+            let url;
+            try {
+              url = new URL(text);
+            } catch {
+              return { spotify: false, supported: false, short: false, type: null, id: null, error: null };
+            }
+
+            const host = url.hostname.toLowerCase();
+            if (host === SPOTIFY_SHORT_HOST) {
+              if (url.protocol !== 'https:') return unsupportedSpotify('Spotify short links must use https://spotify.link/.');
+              return { spotify: true, supported: true, short: true, type: null, id: null, error: null };
+            }
+            if (host !== SPOTIFY_HOST) return { spotify: false, supported: false, short: false, type: null, id: null, error: null };
+            if (url.protocol !== 'https:') return unsupportedSpotify('Spotify links must use https://open.spotify.com/.');
+
+            const parts = url.pathname.split('/').filter(Boolean);
+            if (parts[0] && /^intl-[a-z]{2,3}$/i.test(parts[0])) parts.shift();
+            if (parts.length !== 2) return unsupportedSpotify();
+
+            const type = String(parts[0] || '').toLowerCase();
+            const id = String(parts[1] || '');
+            if (!SPOTIFY_TYPES.has(type) || !SPOTIFY_ID_RE.test(id)) return unsupportedSpotify();
+            return { spotify: true, supported: true, short: false, type, id, error: null };
+          }
+
+          function spotifyCanonicalUrl(info, original) {
+            if (info?.short) return String(original || '').trim();
+            if (!info?.type || !info?.id) return String(original || '').trim();
+            return `https://open.spotify.com/${info.type}/${info.id}`;
+          }
+
+          function spotifyEmbedReference(html) {
+            const match = String(html || '').match(/https:\/\/open\.spotify\.com\/embed\/(track|album|playlist)\/([A-Za-z0-9]{22})/i);
+            if (!match) return null;
+            return { type: match[1].toLowerCase(), id: match[2] };
+          }
+
+          export async function fetchSpotifyOEmbed(value, { fetchImpl = globalThis.fetch, timeoutMs = SPOTIFY_OEMBED_TIMEOUT_MS } = {}) {
+            const clean = String(value || '').trim();
+            const info = classifySpotifyInput(clean);
+            if (!info.spotify || !info.supported) throw new Error(info.error || 'Unsupported Spotify reference.');
+            if (typeof fetchImpl !== 'function') throw new Error('Spotify metadata lookup is unavailable in this runtime.');
+
+            const spotifyUrl = spotifyCanonicalUrl(info, clean);
+            const endpoint = new URL(SPOTIFY_OEMBED_ENDPOINT);
+            endpoint.searchParams.set('url', spotifyUrl);
+
+            let response;
+            try {
+              response = await fetchImpl(endpoint, {
+                headers: { Accept: 'application/json' },
+                signal: timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined,
+              });
+            } catch (error) {
+              const reason = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timed out' : 'failed';
+              throw new Error(`Spotify metadata lookup ${reason}. Try the song name or a YouTube link instead.`);
+            }
+
+            if (!response?.ok) throw new Error(`Spotify metadata lookup failed (HTTP ${response?.status || 'unknown'}).`);
+            const declaredBytes = Number(response.headers?.get?.('content-length') || 0);
+            if (declaredBytes > SPOTIFY_OEMBED_MAX_BYTES) throw new Error('Spotify metadata response was unexpectedly large.');
+
+            const body = await response.text();
+            if (Buffer.byteLength(body, 'utf8') > SPOTIFY_OEMBED_MAX_BYTES) throw new Error('Spotify metadata response was unexpectedly large.');
+
+            let data;
+            try { data = JSON.parse(body); }
+            catch { throw new Error('Spotify metadata response was invalid.'); }
+
+            const embedded = spotifyEmbedReference(data?.html);
+            const type = embedded?.type || info.type;
+            const id = embedded?.id || info.id;
+            const title = String(data?.title || '').trim();
+            if (!SPOTIFY_TYPES.has(type) || !SPOTIFY_ID_RE.test(String(id || '')) || !title) {
+              throw new Error('Spotify link is not a supported track, album, or playlist reference.');
+            }
+
+            return {
+              title,
+              type,
+              id,
+              canonicalUrl: `https://open.spotify.com/${type}/${id}`,
+            };
+          }
+
+          export function isHttpUrl(value) {
+            try {
+              const url = new URL(String(value || '').trim());
+              return url.protocol === 'http:' || url.protocol === 'https:';
+            } catch {
+              return false;
+            }
+          }
+
+          export function hasExplicitSearchPrefix(value) {
+            return /^(?:ytmsearch|ytsearch|scsearch|spsearch):/i.test(String(value || '').trim());
+          }
+
+          async function searchTextPreferred(target, clean, requester) {
+            let ytmError = null;
+            try {
+              const ytm = await target.search(clean, { requester, source: 'ytmsearch:' });
+              if (ytm?.tracks?.length) return ytm;
+            } catch (error) {
+              ytmError = error;
+            }
+
+            try {
+              return await target.search(clean, { requester, source: 'ytsearch:' });
+            } catch (error) {
+              throw error || ytmError || new Error(`No results for: ${clean}`);
+            }
+          }
+
+          export async function resolvePreferredSearch(target, query, requester, { spotifyConfigured = false, spotifyOEmbedOptions = {} } = {}) {
+            const clean = String(query || '').trim();
+            if (!clean) throw new Error('Search query is empty.');
+
+            const spotify = classifySpotifyInput(clean);
+            if (spotify.spotify) {
+              if (!spotify.supported) throw new Error(spotify.error);
+
+              let metadata = null;
+              let type = spotify.type;
+              let directQuery = spotifyCanonicalUrl(spotify, clean);
+
+              // spotify.link does not expose the object type in its path. oEmbed is
+              // the official lightweight way to resolve it to a canonical Spotify
+              // entity without using the Premium-gated Web API.
+              if (spotify.short) {
+                metadata = await fetchSpotifyOEmbed(clean, spotifyOEmbedOptions);
+                type = metadata.type;
+                directQuery = metadata.canonicalUrl;
+              }
+
+              if (spotifyConfigured) {
+                let directError = null;
+                try {
+                  const direct = await target.search(directQuery, { requester });
+                  if (direct?.tracks?.length) return direct;
+                  directError = new Error('Spotify returned no playable mirror results.');
+                } catch (error) {
+                  directError = error;
+                }
+
+                // Album/playlist fallback cannot be reconstructed from oEmbed,
+                // because it returns basic entity metadata rather than a tracklist.
+                if (type !== 'track') throw directError;
+              }
+
+              if (type !== 'track') {
+                throw new Error('Spotify album/playlist links require working SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET credentials. Single track links work without them.');
+              }
+
+              // Track-only fallback: Spotify supplies metadata; YTM/YouTube still
+              // supplies the actual audio. This is outside the live audio path and
+              // uses a short bounded HTTP timeout, so it cannot stall an active song.
+              metadata ||= await fetchSpotifyOEmbed(directQuery, spotifyOEmbedOptions);
+              if (metadata.type !== 'track') throw new Error('Spotify fallback supports single track links only.');
+              return searchTextPreferred(target, metadata.title, requester);
+            }
+
+            // Never rewrite direct URLs or an explicitly requested search prefix.
+            if (isHttpUrl(clean) || hasExplicitSearchPrefix(clean)) return target.search(clean, { requester });
+            return searchTextPreferred(target, clean, requester);
+          }
+          EOF
+
+          cat > test/source-routing.test.js <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { classifySpotifyInput, fetchSpotifyOEmbed, resolvePreferredSearch } from '../src/source-routing.js';
+
+          const config = fs.readFileSync('src/config.js', 'utf8');
+          const envExample = fs.readFileSync('.env.example', 'utf8');
+          const lavalink = fs.readFileSync('lavalink/application.yml', 'utf8');
+          const launcher = fs.readFileSync('start-bot.bat', 'utf8');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+
+          function fakeTarget(handler) {
+            const calls = [];
+            return {
+              calls,
+              async search(query, options = {}) {
+                calls.push({ query, options });
+                return handler(query, options, calls.length);
+              },
+            };
+          }
+
+          function fakeOEmbed({ title = 'Never Gonna Give You Up', type = 'track', id = '4uLU6hMCjMI75M1A2tKUQC', status = 200 } = {}) {
+            const calls = [];
+            const fetchImpl = async (url, options = {}) => {
+              calls.push({ url: String(url), options });
+              return {
+                ok: status >= 200 && status < 300,
+                status,
+                headers: { get: () => null },
+                async text() {
+                  return JSON.stringify({
+                    provider_name: 'Spotify',
+                    title,
+                    html: `<iframe src="https://open.spotify.com/embed/${type}/${id}?utm_source=oembed"></iframe>`,
+                  });
+                },
+              };
+            };
+            return { calls, fetchImpl };
+          }
+
+          test('plain text routing uses YTM first and does not call YouTube when YTM succeeds', async () => {
+            const target = fakeTarget(async (_query, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: 'Rose' }] : [] }));
+            const result = await resolvePreferredSearch(target, 'D.O Rose', { id: 'u1' });
+            assert.equal(result.tracks[0].title, 'Rose');
+            assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:']);
+          });
+
+          test('YTM empty/error falls back once to normal YouTube', async () => {
+            for (const ytmMode of ['empty', 'error']) {
+              const target = fakeTarget(async (_query, options) => {
+                if (options.source === 'ytmsearch:') {
+                  if (ytmMode === 'error') throw new Error('ytm unavailable');
+                  return { tracks: [] };
+                }
+                if (options.source === 'ytsearch:') return { tracks: [{ title: 'fallback' }] };
+                throw new Error('unexpected route');
+              });
+              const result = await resolvePreferredSearch(target, 'D.O Rose', null);
+              assert.equal(result.tracks[0].title, 'fallback');
+              assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:', 'ytsearch:']);
+            }
+          });
+
+          test('direct non-Spotify URLs and explicit search prefixes are never rewritten', async () => {
+            for (const query of ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'ytsearch:D.O Rose', 'ytmsearch:D.O Rose', 'scsearch:D.O Rose']) {
+              const target = fakeTarget(async () => ({ tracks: [{ title: 'direct' }] }));
+              await resolvePreferredSearch(target, query, null);
+              assert.equal(target.calls.length, 1);
+              assert.equal(target.calls[0].query, query);
+              assert.equal(target.calls[0].options.source, undefined);
+            }
+          });
+
+          test('Spotify track/album/playlist references are strictly classified', () => {
+            const id = '4uLU6hMCjMI75M1A2tKUQC';
+            for (const value of [
+              `https://open.spotify.com/track/${id}?si=abc`,
+              `https://open.spotify.com/album/${id}`,
+              `https://open.spotify.com/playlist/${id}/`,
+              `https://open.spotify.com/intl-de/track/${id}`,
+              `spotify:track:${id}`,
+              `spotify:album:${id}`,
+              `spotify:playlist:${id}`,
+            ]) {
+              const info = classifySpotifyInput(value);
+              assert.equal(info.spotify, true, value);
+              assert.equal(info.supported, true, value);
+              assert.ok(['track', 'album', 'playlist'].includes(info.type), value);
+            }
+            const short = classifySpotifyInput('https://spotify.link/example');
+            assert.equal(short.spotify, true);
+            assert.equal(short.supported, true);
+            assert.equal(short.short, true);
+            assert.equal(short.type, null);
+          });
+
+          test('unsupported or malformed Spotify objects are rejected before Lavalink', async () => {
+            const id = '4uLU6hMCjMI75M1A2tKUQC';
+            for (const query of [
+              `https://open.spotify.com/artist/${id}`,
+              `https://open.spotify.com/episode/${id}`,
+              `https://open.spotify.com/show/${id}`,
+              'https://open.spotify.com/track/not-a-valid-id',
+              `https://open.spotify.com/track/${id}/extra`,
+              `spotify:artist:${id}`,
+              'spotify:track:bad',
+            ]) {
+              const target = fakeTarget(async () => ({ tracks: [] }));
+              await assert.rejects(() => resolvePreferredSearch(target, query, null, { spotifyConfigured: true }), /Unsupported Spotify|Malformed Spotify/);
+              assert.equal(target.calls.length, 0, query);
+            }
+          });
+
+          test('unconfigured Spotify track uses official oEmbed metadata then YTM', async () => {
+            const query = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc';
+            const oembed = fakeOEmbed();
+            const target = fakeTarget(async (searched, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: searched }] : [] }));
+            const result = await resolvePreferredSearch(target, query, { id: 'u1' }, { spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } });
+            assert.equal(result.tracks[0].title, 'Never Gonna Give You Up');
+            assert.equal(oembed.calls.length, 1);
+            assert.equal(target.calls.length, 1);
+            assert.equal(target.calls[0].query, 'Never Gonna Give You Up');
+            assert.equal(target.calls[0].options.source, 'ytmsearch:');
+          });
+
+          test('configured Spotify track prefers LavaSrc and does not call oEmbed when direct mirroring works', async () => {
+            const query = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc';
+            const oembed = fakeOEmbed();
+            const target = fakeTarget(async () => ({ type: 'TRACK', tracks: [{ title: 'Spotify mirrored' }] }));
+            const result = await resolvePreferredSearch(target, query, { id: 'u1' }, { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } });
+            assert.equal(result.tracks[0].title, 'Spotify mirrored');
+            assert.equal(target.calls.length, 1);
+            assert.equal(target.calls[0].query, 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC');
+            assert.equal(oembed.calls.length, 0);
+          });
+
+          test('configured but unusable Spotify track falls back through oEmbed instead of failing', async () => {
+            const query = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC';
+            const oembed = fakeOEmbed();
+            const target = fakeTarget(async (_searched, options, callNumber) => {
+              if (callNumber === 1) throw new Error('Spotify API unavailable');
+              if (options.source === 'ytmsearch:') return { tracks: [{ title: 'fallback mirror' }] };
+              return { tracks: [] };
+            });
+            const result = await resolvePreferredSearch(target, query, { id: 'u1' }, { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } });
+            assert.equal(result.tracks[0].title, 'fallback mirror');
+            assert.equal(oembed.calls.length, 1);
+            assert.deepEqual(target.calls.map((call) => call.options.source), [undefined, 'ytmsearch:']);
+          });
+
+          test('Spotify short track links resolve via oEmbed and use a canonical URL for configured LavaSrc', async () => {
+            const oembed = fakeOEmbed();
+            const target = fakeTarget(async (searched) => ({ tracks: [{ title: searched }] }));
+            const result = await resolvePreferredSearch(target, 'https://spotify.link/example', null, { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } });
+            assert.equal(result.tracks.length, 1);
+            assert.equal(oembed.calls.length, 1);
+            assert.equal(target.calls[0].query, 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC');
+          });
+
+          test('album/playlist without working Spotify credentials fail clearly instead of pretending oEmbed has a tracklist', async () => {
+            const target = fakeTarget(async () => ({ tracks: [] }));
+            for (const type of ['album', 'playlist']) {
+              await assert.rejects(() => resolvePreferredSearch(target, `https://open.spotify.com/${type}/4uLU6hMCjMI75M1A2tKUQC`, null), /album\/playlist links require working/);
+            }
+            assert.equal(target.calls.length, 0);
+          });
+
+          test('oEmbed responses are size-bounded before JSON parsing', async () => {
+            const hugeFetch = async () => ({
+              ok: true,
+              status: 200,
+              headers: { get: () => String(70 * 1024) },
+              async text() { return '{}'; },
+            });
+            await assert.rejects(() => fetchSpotifyOEmbed('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC', { fetchImpl: hugeFetch, timeoutMs: 0 }), /unexpectedly large/);
+          });
+
+          test('Spotify remains optional and LavaSrc mirrors albums/playlists via YTM before YouTube', () => {
+            assert.equal(pkg.version, '0.1.8');
+            assert.match(envExample, /Single Spotify track links work without these credentials/i);
+            assert.match(config, /spotifyClientId/);
+            assert.match(config, /spotifyClientSecret/);
+            assert.match(lavalink, /lavasrc-plugin:4\.8\.3/);
+            assert.match(lavalink, /spotify:\s*\$\{SPOTIFY_ENABLED:false\}/);
+            const ytmProvider = lavalink.indexOf('ytmsearch:%QUERY%');
+            const ytProvider = lavalink.indexOf('ytsearch:%QUERY%');
+            assert.ok(ytmProvider >= 0 && ytProvider > ytmProvider, 'Spotify mirroring must prefer YTM before YouTube');
+          });
+
+          test('launcher passes Spotify secrets via child environment, not Java arguments', () => {
+            assert.match(launcher, /SPOTIFY_CLIENT_ID/);
+            assert.match(launcher, /SPOTIFY_CLIENT_SECRET/);
+            assert.match(launcher, /SPOTIFY_ENABLED='true'/);
+            assert.doesNotMatch(launcher, /-DSPOTIFY_CLIENT_SECRET|--plugins\.lavasrc\.spotify\.clientSecret/i);
+          });
+
+          test('playback audit keeps raw low-RAM policy and enables lightweight GC warnings', () => {
+            assert.match(lavalink, /http:\s*false/);
+            assert.match(lavalink, /local:\s*false/);
+            assert.match(lavalink, /nonAllocatingFrameBuffer:\s*true/);
+            assert.match(lavalink, /bufferDurationMs:\s*2000/);
+            assert.match(lavalink, /frameBufferDurationMs:\s*20000/);
+            assert.match(lavalink, /gc-warnings:\s*true/);
+            for (const filter of ['equalizer', 'karaoke', 'timescale', 'tremolo', 'vibrato', 'distortion', 'rotation', 'channelMix', 'lowPass']) {
+              assert.match(lavalink, new RegExp(`${filter}:\\s*false`, 'i'));
+            }
+          });
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          env = Path('.env.example')
+          text = env.read_text()
+          text = text.replace(
+              '# Optional Spotify URL metadata/mirroring via LavaSrc. Spotify Web API now requires\n# a Premium-owned developer app in Development Mode. Leave blank to disable.\n',
+              '# Optional Spotify album/playlist mirroring via LavaSrc. Spotify Web API now requires\n# a Premium-owned developer app in Development Mode. Single Spotify track links work\n# without these credentials through official oEmbed metadata -> YTM/YouTube fallback.\n'
+          )
+          env.write_text(text)
+
+          app = Path('lavalink/application.yml')
+          text = app.read_text()
+          needle = '    youtubePlaylistLoadLimit: 3\n'
+          if '    gc-warnings: true\n' not in text:
+              text = text.replace(needle, needle + '    # Lightweight diagnostic only: logs long JVM GC pauses that can correlate with audio dropouts.\n    gc-warnings: true\n', 1)
+          app.write_text(text)
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          text = text.replace(
+              'Only the three Discord values are mandatory. Gemini is optional.\n',
+              'Only the three Discord values are mandatory. Gemini is optional. Single Spotify **track** links also work without Spotify credentials through the official oEmbed metadata endpoint and are mirrored through the existing YTM/YouTube search path. Spotify album/playlist importing still needs working LavaSrc Spotify credentials.\n'
+          )
+          text = text.replace(
+              '# Optional Spotify URL metadata/mirroring (Spotify developer app required)\n',
+              '# Optional Spotify album/playlist mirroring (Premium-owned developer app required)\n# Single track links work without credentials via oEmbed -> YTM/YouTube\n'
+          )
+          text = text.replace(
+              '- SoundCloud\n- Bandcamp\n',
+              '- Spotify single-track links through official oEmbed metadata -> YTM/YouTube audio; no Spotify credentials are required for this fallback. If working Spotify/LavaSrc credentials exist, direct metadata mirroring is tried first and a failed track lookup falls back automatically. Album/playlist importing still requires those credentials. `spotify.link` short links are canonicalized through oEmbed.\n- SoundCloud\n- Bandcamp\n'
+          )
+          text = text.replace(
+              '- **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.\n',
+              '- **Spotify track fallback is bounded:** oEmbed metadata lookup uses the existing Node process only, has a 2.5-second timeout and 64 KiB response ceiling, then reuses the normal YTM -> YouTube search path. It never enters the live Lavalink audio stream.\n- **GC pause diagnostics:** Lavalink GC warnings are enabled so a future Java pause can be correlated with frame starvation without adding a monitor/service or changing the buffer profile.\n- **No extra services:** no Docker, WSL, MongoDB, Redis, browser dashboard, FFmpeg sidecar, Python worker, or local AI process is introduced.\n'
+          )
+          readme.write_text(text)
+          PY
+
+          npm version 0.1.8 --no-git-tag-version
+          npm ci
+          npm run check
+          npm test
+
+          git diff --check
+          git status --short
+
+      - name: Commit verified product changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "MrEz"
+          git config user.email "39240221+Zudin987@users.noreply.github.com"
+          git add src/source-routing.js test/source-routing.test.js .env.example lavalink/application.yml README.md package.json package-lock.json
+          git commit -m "feat: add Spotify oEmbed track fallback and playback diagnostics"
+          git push origin HEAD:feat/v018-spotify-oembed-performance
