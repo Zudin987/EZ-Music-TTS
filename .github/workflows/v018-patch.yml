@@ -66,3 +66,5 @@ jobs:
             git commit -m 'chore: finalize v0.1.8 metadata and docs'
             git push origin HEAD:feat/v018-spotify-oembed-performance
           fi
+
+      # This workflow is temporary and removed before the PR is opened.
