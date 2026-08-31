@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { classifySpotifyInput, resolvePreferredSearch } from '../src/source-routing.js';
+import { classifySpotifyInput, fetchSpotifyOEmbed, resolvePreferredSearch } from '../src/source-routing.js';
 
 const config = fs.readFileSync('src/config.js', 'utf8');
 const envExample = fs.readFileSync('.env.example', 'utf8');
@@ -20,18 +20,38 @@ function fakeTarget(handler) {
   };
 }
 
-test('plain text routing uses YTM first and does not call YouTube when YTM succeeds', async () => {
+function fakeOEmbed({ title = 'Never Gonna Give You Up', type = 'track', id = '4uLU6hMCjMI75M1A2tKUQC', status = 200 } = {}) {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: () => null },
+      async text() {
+        return JSON.stringify({
+          provider_name: 'Spotify',
+          title,
+          html: `<iframe src="https://open.spotify.com/embed/${type}/${id}?utm_source=oembed"></iframe>`,
+        });
+      },
+    };
+  };
+  return { calls, fetchImpl };
+}
+
+test('plain text routing uses YTM first and skips YouTube when YTM succeeds', async () => {
   const target = fakeTarget(async (_query, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: 'Rose' }] : [] }));
   const result = await resolvePreferredSearch(target, 'D.O Rose', { id: 'u1' });
   assert.equal(result.tracks[0].title, 'Rose');
   assert.deepEqual(target.calls.map((call) => call.options.source), ['ytmsearch:']);
 });
 
-test('YTM empty/error falls back once to normal YouTube', async () => {
-  for (const ytmMode of ['empty', 'error']) {
+test('YTM empty/error falls back once to YouTube search', async () => {
+  for (const mode of ['empty', 'error']) {
     const target = fakeTarget(async (_query, options) => {
       if (options.source === 'ytmsearch:') {
-        if (ytmMode === 'error') throw new Error('ytm unavailable');
+        if (mode === 'error') throw new Error('ytm unavailable');
         return { tracks: [] };
       }
       if (options.source === 'ytsearch:') return { tracks: [{ title: 'fallback' }] };
@@ -43,7 +63,7 @@ test('YTM empty/error falls back once to normal YouTube', async () => {
   }
 });
 
-test('direct URLs and explicit search prefixes are never rewritten', async () => {
+test('direct non-Spotify URLs and explicit search prefixes are not rewritten', async () => {
   for (const query of ['https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'ytsearch:D.O Rose', 'ytmsearch:D.O Rose', 'scsearch:D.O Rose']) {
     const target = fakeTarget(async () => ({ tracks: [{ title: 'direct' }] }));
     await resolvePreferredSearch(target, query, null);
@@ -53,7 +73,7 @@ test('direct URLs and explicit search prefixes are never rewritten', async () =>
   }
 });
 
-test('Spotify track/album/playlist references are strictly classified', () => {
+test('Spotify track/album/playlist references and short links are classified', () => {
   const id = '4uLU6hMCjMI75M1A2tKUQC';
   for (const value of [
     `https://open.spotify.com/track/${id}?si=abc`,
@@ -69,9 +89,14 @@ test('Spotify track/album/playlist references are strictly classified', () => {
     assert.equal(info.supported, true, value);
     assert.ok(['track', 'album', 'playlist'].includes(info.type), value);
   }
+  const short = classifySpotifyInput('https://spotify.link/example');
+  assert.equal(short.spotify, true);
+  assert.equal(short.supported, true);
+  assert.equal(short.short, true);
+  assert.equal(short.type, null);
 });
 
-test('unsupported or malformed Spotify objects are rejected before Lavalink', async () => {
+test('unsupported/malformed Spotify objects are rejected before Lavalink', async () => {
   const id = '4uLU6hMCjMI75M1A2tKUQC';
   for (const query of [
     `https://open.spotify.com/artist/${id}`,
@@ -88,31 +113,95 @@ test('unsupported or malformed Spotify objects are rejected before Lavalink', as
   }
 });
 
-test('Spotify short links and unconfigured Spotify fail clearly without search calls', async () => {
-  const id = '4uLU6hMCjMI75M1A2tKUQC';
-  const shortTarget = fakeTarget(async () => ({ tracks: [] }));
-  await assert.rejects(() => resolvePreferredSearch(shortTarget, 'https://spotify.link/example', null, { spotifyConfigured: true }), /Spotify short links/);
-  assert.equal(shortTarget.calls.length, 0);
+test('unconfigured Spotify track uses oEmbed metadata then YTM', async () => {
+  const oembed = fakeOEmbed();
+  const target = fakeTarget(async (query, options) => ({ tracks: options.source === 'ytmsearch:' ? [{ title: query }] : [] }));
+  const result = await resolvePreferredSearch(
+    target,
+    'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc',
+    { id: 'u1' },
+    { spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } },
+  );
+  assert.equal(result.tracks[0].title, 'Never Gonna Give You Up');
+  assert.equal(oembed.calls.length, 1);
+  assert.equal(target.calls.length, 1);
+  assert.equal(target.calls[0].query, 'Never Gonna Give You Up');
+  assert.equal(target.calls[0].options.source, 'ytmsearch:');
+});
 
+test('configured Spotify track uses LavaSrc directly when it works', async () => {
+  const oembed = fakeOEmbed();
+  const target = fakeTarget(async () => ({ type: 'TRACK', tracks: [{ title: 'Spotify mirrored' }] }));
+  const result = await resolvePreferredSearch(
+    target,
+    'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc',
+    { id: 'u1' },
+    { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } },
+  );
+  assert.equal(result.tracks[0].title, 'Spotify mirrored');
+  assert.equal(target.calls.length, 1);
+  assert.equal(target.calls[0].query, 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC');
+  assert.equal(oembed.calls.length, 0);
+});
+
+test('configured but unusable Spotify track automatically falls back through oEmbed', async () => {
+  const oembed = fakeOEmbed();
+  const target = fakeTarget(async (_query, options, callNumber) => {
+    if (callNumber === 1) throw new Error('Spotify API unavailable');
+    if (options.source === 'ytmsearch:') return { tracks: [{ title: 'fallback mirror' }] };
+    return { tracks: [] };
+  });
+  const result = await resolvePreferredSearch(
+    target,
+    'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+    { id: 'u1' },
+    { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } },
+  );
+  assert.equal(result.tracks[0].title, 'fallback mirror');
+  assert.equal(oembed.calls.length, 1);
+  assert.deepEqual(target.calls.map((call) => call.options.source), [undefined, 'ytmsearch:']);
+});
+
+test('Spotify short track link resolves to a canonical URL before configured LavaSrc', async () => {
+  const oembed = fakeOEmbed();
+  const target = fakeTarget(async (query) => ({ tracks: [{ title: query }] }));
+  await resolvePreferredSearch(
+    target,
+    'https://spotify.link/example',
+    null,
+    { spotifyConfigured: true, spotifyOEmbedOptions: { fetchImpl: oembed.fetchImpl, timeoutMs: 0 } },
+  );
+  assert.equal(oembed.calls.length, 1);
+  assert.equal(target.calls[0].query, 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC');
+});
+
+test('album/playlist without working credentials fail clearly; oEmbed is not treated as a tracklist', async () => {
   const target = fakeTarget(async () => ({ tracks: [] }));
-  await assert.rejects(() => resolvePreferredSearch(target, `https://open.spotify.com/track/${id}`, null), /Spotify URL support is not configured/);
+  for (const type of ['album', 'playlist']) {
+    await assert.rejects(
+      () => resolvePreferredSearch(target, `https://open.spotify.com/${type}/4uLU6hMCjMI75M1A2tKUQC`, null),
+      /album\/playlist links require working/,
+    );
+  }
   assert.equal(target.calls.length, 0);
 });
 
-test('configured valid Spotify references are passed directly to LavaSrc once', async () => {
-  const query = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=abc';
-  const target = fakeTarget(async () => ({ type: 'TRACK', tracks: [{ title: 'Spotify mirrored' }] }));
-  const result = await resolvePreferredSearch(target, query, { id: 'u1' }, { spotifyConfigured: true });
-  assert.equal(result.tracks[0].title, 'Spotify mirrored');
-  assert.equal(target.calls.length, 1);
-  assert.equal(target.calls[0].query, query);
-  assert.equal(target.calls[0].options.source, undefined);
+test('oEmbed response is size-bounded before body parsing', async () => {
+  const hugeFetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => String(70 * 1024) },
+    async text() { return '{}'; },
+  });
+  await assert.rejects(
+    () => fetchSpotifyOEmbed('https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC', { fetchImpl: hugeFetch, timeoutMs: 0 }),
+    /unexpectedly large/,
+  );
 });
 
-test('Spotify remains optional and LavaSrc mirrors via YTM before YouTube', () => {
-  assert.equal(pkg.version, '0.1.7');
-  assert.match(envExample, /SPOTIFY_CLIENT_ID=/);
-  assert.match(envExample, /SPOTIFY_CLIENT_SECRET=/);
+test('Spotify remains optional and LavaSrc provider order stays YTM before YouTube', () => {
+  assert.equal(pkg.version, '0.1.8');
+  assert.match(envExample, /Single Spotify track links work without these credentials/i);
   assert.match(config, /spotifyClientId/);
   assert.match(config, /spotifyClientSecret/);
   assert.match(lavalink, /lavasrc-plugin:4\.8\.3/);
@@ -122,16 +211,20 @@ test('Spotify remains optional and LavaSrc mirrors via YTM before YouTube', () =
   assert.ok(ytmProvider >= 0 && ytProvider > ytmProvider, 'Spotify mirroring must prefer YTM before YouTube');
 });
 
-test('launcher passes Spotify secrets via child environment, not Java arguments', () => {
+test('launcher passes Spotify secrets through child environment, not Java arguments', () => {
   assert.match(launcher, /SPOTIFY_CLIENT_ID/);
   assert.match(launcher, /SPOTIFY_CLIENT_SECRET/);
   assert.match(launcher, /SPOTIFY_ENABLED='true'/);
   assert.doesNotMatch(launcher, /-DSPOTIFY_CLIENT_SECRET|--plugins\.lavasrc\.spotify\.clientSecret/i);
 });
 
-test('new source support does not enable DSP or generic HTTP/local playback', () => {
+test('playback audit preserves low-RAM/raw-audio invariants and enables GC warnings', () => {
   assert.match(lavalink, /http:\s*false/);
   assert.match(lavalink, /local:\s*false/);
+  assert.match(lavalink, /nonAllocatingFrameBuffer:\s*true/);
+  assert.match(lavalink, /bufferDurationMs:\s*2000/);
+  assert.match(lavalink, /frameBufferDurationMs:\s*20000/);
+  assert.match(lavalink, /gc-warnings:\s*true/);
   for (const filter of ['equalizer', 'karaoke', 'timescale', 'tremolo', 'vibrato', 'distortion', 'rotation', 'channelMix', 'lowPass']) {
     assert.match(lavalink, new RegExp(`${filter}:\\s*false`, 'i'));
   }
