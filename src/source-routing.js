@@ -1,3 +1,5 @@
+import { rankSearchResult, SEARCH_MATCH_THRESHOLD } from './search-quality.js';
+
 const SPOTIFY_HOST = 'open.spotify.com';
 const SPOTIFY_SHORT_HOST = 'spotify.link';
 const SPOTIFY_ID_RE = /^[A-Za-z0-9]{22}$/;
@@ -130,16 +132,28 @@ export function hasExplicitSearchPrefix(value) {
 
 async function searchTextPreferred(target, clean, requester) {
   let ytmError = null;
+  let rankedYtm = null;
   try {
     const ytm = await target.search(clean, { requester, source: 'ytmsearch:' });
-    if (ytm?.tracks?.length) return ytm;
+    if (ytm?.tracks?.length) {
+      rankedYtm = rankSearchResult(ytm, clean);
+      if (rankedYtm.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYtm.result;
+    }
   } catch (error) {
     ytmError = error;
   }
 
   try {
-    return await target.search(clean, { requester, source: 'ytsearch:' });
+    const youtube = await target.search(clean, { requester, source: 'ytsearch:' });
+    if (youtube?.tracks?.length) {
+      const rankedYoutube = rankSearchResult(youtube, clean);
+      if (rankedYoutube.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYoutube.result;
+    }
+    // A weak result is worse than an explicit no-result message: never silently
+    // substitute an unrelated title merely because a search endpoint returned it.
+    return { ...(youtube || rankedYtm?.result || {}), tracks: [] };
   } catch (error) {
+    if (rankedYtm?.bestScore >= SEARCH_MATCH_THRESHOLD) return rankedYtm.result;
     throw error || ytmError || new Error(`No results for: ${clean}`);
   }
 }

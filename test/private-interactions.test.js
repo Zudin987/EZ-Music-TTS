@@ -9,7 +9,7 @@ const index = fs.readFileSync('src/index.js', 'utf8');
 test('only /nowplaying is public and it uses Discord silent notifications', () => {
   assert.match(commands, /const PRIVATE_FLAGS = MessageFlags\.Ephemeral/);
   assert.match(commands, /const PUBLIC_NOWPLAYING_FLAGS = MessageFlags\.SuppressNotifications/);
-  assert.match(commands, /await publicNowPlayingReply\(interaction, panelPayload\(player, interaction\.guildId\)\)/);
+  assert.match(commands, /await publicNowPlayingReply\(interaction, panelPayload\(player, interaction\.guildId, notice\)\)/);
   assert.doesNotMatch(commands, /\bephemeral\s*:/i);
   assert.doesNotMatch(commands, /deferReply\(\s*\)/);
   assert.doesNotMatch(commands, /interaction\.reply\(\s*['"`]/);

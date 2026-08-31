@@ -25,6 +25,7 @@ import {
 import { parseTimeToSeconds, trackKey, truncate } from './utils.js';
 import { voiceTransportQuality } from './performance.js';
 import { createSearchPickerRegistry } from './search-picker.js';
+import { ensureQueuedPlayback } from './playback-start.js';
 
 const PRIVATE_FLAGS = MessageFlags.Ephemeral;
 const PUBLIC_NOWPLAYING_FLAGS = MessageFlags.SuppressNotifications;
@@ -184,10 +185,16 @@ async function searchAndQueue(player, query, requester, next, guard, queueTracks
     guard();
     const value = queueTracks(player, tracks, { next, perRequestLimit });
     if (!value.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-    if (!player.playing && !player.paused) await player.play();
-    return value;
+    const startState = await ensureQueuedPlayback(player);
+    return { value, startState };
   });
-  return { tracks: queued.added, result, omitted: queued.omitted, sourceCount: tracks.length };
+  return {
+    tracks: queued.value.added,
+    result,
+    omitted: queued.value.omitted,
+    sourceCount: tracks.length,
+    started: Boolean(queued.startState?.started),
+  };
 }
 
 async function resolveSearchQueries(player, queries, requester, seen = new Set(), limit = 10, concurrency = 3, guard = () => {}, searchPreferred = null) {
@@ -350,7 +357,7 @@ function helpText() {
     'The player auto-refreshes about every 10 seconds for up to ~14 minutes; Refresh or Back starts a fresh live window.',
     'Queue Manager: select tracks, Remove / Move Next / Play Now / Dedupe, with a 5-minute Undo for clear/remove/dedupe.',
     'More: seek/replay plus Favorites and Recent History. `/play select:true` privately lets you choose an exact search result.',
-    'Plain-text song searches try YouTube Music first, then normal YouTube. Spotify URLs work when optional Spotify app credentials are configured.',
+    'Plain-text song searches prefer relevant YouTube Music matches, then fall back to normal YouTube. Single Spotify tracks also work without Spotify app credentials.',
     '`/status` offers Resume/Discard when a recent crash/restart session is recoverable.',
     '`/clear` keeps the current song playing, clears everything upcoming, and turns loop/autoplay off.',
     '`/stop` fully resets current/upcoming/previous state. Volume stays saved until changed again.',
@@ -397,7 +404,7 @@ const queuePayload = (player, guildId, page = 0, selectedIndex = null, notice = 
 const livePanels = createLivePanelRegistry({
   render: async (sourceInteraction, { retiring }) => {
     const currentPlayer = music.players.get(sourceInteraction.guildId);
-    if (!currentPlayer?.queue?.current) {
+    if (!currentPlayer?.queue?.current && !Number(currentPlayer?.queue?.length || 0)) {
       return {
         payload: panelPayload(
           currentPlayer,
@@ -424,7 +431,7 @@ const livePanels = createLivePanelRegistry({
 async function editLivePanel(interaction, player, notice = null) {
   const currentPlayer = music.players.get(interaction.guildId) || player;
   const result = await interaction.editReply(panelPayload(currentPlayer, interaction.guildId, notice));
-  if (currentPlayer?.queue?.current) livePanels.track(interaction);
+  if (currentPlayer?.queue?.current || Number(currentPlayer?.queue?.length || 0) > 0) livePanels.track(interaction);
   else livePanels.pause(interaction);
   return result;
 }
@@ -462,7 +469,7 @@ async function editLivePanel(interaction, player, notice = null) {
       } else {
         const queued = queueTracks(player, [track], { next: true, perRequestLimit: 1 });
         if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-        if (!player.playing && !player.paused) await player.play();
+        await ensureQueuedPlayback(player);
       }
       checkpointRecovery(player);
     });
@@ -482,7 +489,7 @@ async function editLivePanel(interaction, player, notice = null) {
         else {
           const restored = queueTracks(player, tracks, { next: false, perRequestLimit: queueLimit });
           if (!restored.added.length) throw expectedError(`Cannot restore tracks because the queue is full (maximum ${queueLimit}).`);
-          if (!player.playing && !player.paused) await player.play();
+          await ensureQueuedPlayback(player);
         }
         if (snapshot.loop && ['none', 'track', 'queue'].includes(snapshot.loop)) player.setLoop(snapshot.loop);
         if (snapshot.autoplay && ['off', 'standard', 'ai'].includes(snapshot.autoplay)) {
@@ -541,7 +548,7 @@ async function editLivePanel(interaction, player, notice = null) {
           `Spotify: **Tracks: oEmbed fallback${isSpotifyConfigured() ? ' + LavaSrc' : ''} • Albums/playlists: ${isSpotifyConfigured() ? 'Configured' : 'Not configured'}**`,
           `Autoplay: **${mode === 'ai' ? 'AI' : mode === 'standard' ? 'On' : 'Off'}**`,
           `Saved volume: **${volume}%**`,
-          `Player: **${player ? (isAutoPausedForEmptyVoice(interaction.guildId) ? 'Auto-paused (empty VC)' : player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle') : 'Disconnected'}**`,
+          `Player: **${player ? (isAutoPausedForEmptyVoice(interaction.guildId) ? 'Auto-paused (empty VC)' : (player.paused || player.shoukaku?.paused) ? 'Paused' : player.shoukaku?.track ? 'Playing' : (player.queue?.current || player.queue?.length > 0) ? 'Idle (queue waiting)' : 'Idle') : 'Disconnected'}**`,
         ];
         if (player) {
           const voicePing = Number(player.shoukaku?.ping ?? 0);
@@ -593,12 +600,13 @@ async function editLivePanel(interaction, player, notice = null) {
         const guard = () => assertQueueRequestActive(music, player, interaction.guildId, revision, isQueueRevisionCurrent);
         const queued = await searchAndQueue(player, query, interaction.user, next, guard, queueTracks, queueLimit, searchPreferred, (task) => withGuildOperation(interaction.guildId, task));
         checkpointRecovery(player);
-        const where = next ? 'Queued next' : 'Queued';
         if (queued.result.type === 'PLAYLIST') {
+          const action = queued.started ? '▶️ Started playlist with' : next ? 'Queued next' : 'Queued';
           const limitNote = queued.omitted ? ` Limited for stability: **${queued.omitted} track${queued.omitted === 1 ? '' : 's'} not added** (max ${MAX_PLAYLIST_ADD} per playlist / ${queueLimit} upcoming).` : '';
-          return interaction.editReply(`${where} **${queued.tracks.length} tracks**.${limitNote}`);
+          return interaction.editReply(`${action} **${queued.tracks.length} tracks**.${limitNote}`);
         }
-        return interaction.editReply(`${where} **${safeTitle(queued.tracks[0])}**.`);
+        const action = queued.started ? '▶️ Playing' : next ? 'Queued next' : 'Queued';
+        return interaction.editReply(`${action} **${safeTitle(queued.tracks[0])}**.`);
       }
 
       if (name === 'ai') {
@@ -638,7 +646,7 @@ async function editLivePanel(interaction, player, notice = null) {
           guard();
           const value = queueTracks(player, resolved);
           if (!value.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-          if (!player.playing && !player.paused) await player.play();
+          await ensureQueuedPlayback(player);
           checkpointRecovery(player);
           return value;
         });
@@ -667,9 +675,19 @@ async function editLivePanel(interaction, player, notice = null) {
       const player = getPlayer(music, interaction.guildId);
       if (name === 'nowplaying') {
         requireSameVoice(interaction, player);
-        requireCurrentTrack(player);
-        await publicNowPlayingReply(interaction, panelPayload(player, interaction.guildId));
-        livePanels.track(interaction);
+        let notice = null;
+        if (!player.shoukaku?.track && !player.paused && !player.shoukaku?.paused && (player.queue.current || player.queue.length > 0)) {
+          try {
+            await withGuildOperation(interaction.guildId, async () => {
+              await ensureQueuedPlayback(player);
+              checkpointRecovery(player);
+            });
+          } catch (error) {
+            notice = `⚠️ Playback is idle: ${error?.message || 'the queued track could not start.'}`;
+          }
+        }
+        await publicNowPlayingReply(interaction, panelPayload(player, interaction.guildId, notice));
+        if (player.queue.current || player.queue.length > 0) livePanels.track(interaction);
         return;
       }
       requireSameVoice(interaction, player);
@@ -761,18 +779,20 @@ async function handleSearchSelect(interaction, { music, ensurePlayer, queueTrack
   if (!track) throw expectedError('That search result is no longer available.');
   await interaction.deferUpdate();
   const player = await ensurePlayer(interaction);
-  await withGuildOperation(interaction.guildId, async () => {
+  const startState = await withGuildOperation(interaction.guildId, async () => {
     if (!isQueueRevisionCurrent(interaction.guildId, entry.revision) || music.players.get(interaction.guildId) !== player) {
       searchPickers.delete(token);
       throw expectedError('That search picker is stale because the queue changed. Run `/play` again.');
     }
     const queued = queueTracks(player, [track], { next: entry.next, perRequestLimit: 1 });
     if (!queued.added.length) throw expectedError(`Queue is full (maximum ${queueLimit} upcoming tracks).`);
-    if (!player.playing && !player.paused) await player.play();
+    const state = await ensureQueuedPlayback(player);
     checkpointRecovery(player);
+    return state;
   });
   searchPickers.delete(token);
-  return interaction.editReply({ content: `${entry.next ? 'Queued next' : 'Queued'} **${safeTitle(track)}**.`, embeds: [], components: [] });
+  const action = startState?.started ? '▶️ Playing' : entry.next ? 'Queued next' : 'Queued';
+  return interaction.editReply({ content: `${action} **${safeTitle(track)}**.`, embeds: [], components: [] });
 }
 
 async function handleLibrarySelect(interaction, { getHistoryPayload, getFavoritesPayload }) {

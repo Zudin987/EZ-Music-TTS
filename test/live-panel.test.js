@@ -153,7 +153,8 @@ test('pause immediately removes the matching live lease', () => {
 test('commands wire /nowplaying and player-return buttons into live refresh', () => {
   const source = readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8');
   assert.match(source, /createLivePanelRegistry/);
-  assert.match(source, /await publicNowPlayingReply\(interaction, panelPayload\(player, interaction\.guildId\)\);\s*livePanels\.track\(interaction\)/);
+  assert.match(source, /await publicNowPlayingReply\(interaction, panelPayload\(player, interaction\.guildId, notice\)\);\s*if \(player\.queue\.current \|\| player\.queue\.length > 0\) livePanels\.track\(interaction\)/);
+  assert.match(source, /if \(!currentPlayer\?\.queue\?\.current && !Number\(currentPlayer\?\.queue\?\.length \|\| 0\)\)/);
   assert.match(source, /livePanels\.pause\(interaction\)/);
   assert.match(source, /return editLivePanel\(interaction, player\)/);
   assert.equal((source.match(/interaction\.editReply\(panelPayload\(/g) || []).length, 1);

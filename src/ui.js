@@ -148,6 +148,20 @@ function idleContainerPayload(notice = null, heading = '⏹️ Playback Idle') {
   ], statusButtons());
 }
 
+function queuedIdleContainerPayload(player, autoplayMode = 'off', notice = null, { canUndo = false } = {}) {
+  const count = Number(player?.queue?.length || 0);
+  const first = player?.queue?.[0];
+  const lines = [
+    '### ⏳ Playback Idle — Queue Waiting',
+    notice ? safeText(notice, 900) : 'Playback is not active yet, but the queue is not empty.',
+    '',
+    `📜 **Up next:** ${count}`,
+  ];
+  if (first) lines.push(`⏭️ **First queued:** ${safeText(first.title, 90)} — ${safeText(first.author || 'Unknown', 50)}`);
+  lines.push('', 'Use **Queue** to inspect/manage the waiting tracks, or **Refresh** after playback starts.');
+  return textContainerPayload(lines, playerButtons(player, autoplayMode, { canUndo }));
+}
+
 export function playerButtons(player, autoplayMode = 'off', { canUndo = false } = {}) {
   const paused = Boolean(player?.paused);
   const hasCurrent = Boolean(player?.queue?.current);
@@ -216,6 +230,7 @@ export function nowPlayingEmbed(track, player, autoplayMode = 'off') {
 
 export function jukeboxPlayerPayload(player, autoplayMode = 'off', notice = null, { canUndo = false } = {}) {
   const track = player?.queue?.current;
+  if (!track && Number(player?.queue?.length || 0) > 0) return queuedIdleContainerPayload(player, autoplayMode, notice, { canUndo });
   if (!track) return idleContainerPayload(notice);
   return trackContainerPayload(track, player, autoplayMode, playerButtons(player, autoplayMode, { canUndo }), { notice });
 }
